@@ -66,7 +66,7 @@ flowchart LR
 ### Setup
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/samarthnirula/rag-investment.git
 cd rag-investment
 
 python3 -m venv venv && source venv/bin/activate
