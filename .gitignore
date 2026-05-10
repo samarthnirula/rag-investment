@@ -1,0 +1,14 @@
+venv/
+.env
+__pycache__/
+*.pyc
+*.egg-info/
+.DS_Store
+data/raw_pdfs/*
+!data/raw_pdfs/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+.streamlit/secrets.toml
+.pytest_cache/
+build/
+dist/
