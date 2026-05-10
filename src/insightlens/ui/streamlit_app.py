@@ -47,7 +47,12 @@ except ConfigError as exc:
     st.error(f"Configuration error: {exc}")
     st.stop()
 
-companies = _load_companies(cfg)
+try:
+    companies = _load_companies(cfg)
+except Exception as exc:
+    st.error(f"Could not connect to Snowflake: {exc}")
+    st.info("Check that your secrets are configured in the Streamlit Cloud dashboard.")
+    st.stop()
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
