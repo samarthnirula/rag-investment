@@ -1,6 +1,14 @@
 """InsightLens — chat-style UI for investment document Q&A."""
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Streamlit Cloud runs `pip install -r requirements.txt` but NOT `pip install -e .`,
+# so the local `insightlens` package isn't on sys.path by default.
+# Insert src/ so imports work both locally and in the cloud.
+sys.path.insert(0, str(Path(__file__).parents[2]))
+
 import os
 
 import streamlit as st
