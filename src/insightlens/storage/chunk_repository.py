@@ -19,6 +19,7 @@ class DocumentRecord:
     version_label: str | None
     version_date: date | None
     page_count: int
+    supersedes_document_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,9 @@ class ChunkRecord:
     chunk_text: str
     token_count: int
     embedding: Sequence[float]
+    section_header: str | None = None
+    chunk_type: str = "body"
+    structured_content: str | None = None
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,10 @@ class RetrievedChunk:
     page_number: int
     chunk_text: str
     similarity: float
+    section_header: str | None = None
+    chunk_type: str = "body"
+    structured_content: str | None = None
+    supersedes_document_id: str | None = None  # non-null → this doc is the newer version
 
 
 class RepositoryError(Exception):
@@ -65,15 +73,19 @@ class ChunkRepository:
                 document_type = %s,
                 version_label = %s,
                 version_date = %s,
-                page_count = %s
+                page_count = %s,
+                supersedes_document_id = %s
             WHEN NOT MATCHED THEN INSERT
-                (document_id, file_name, company, document_type, version_label, version_date, page_count)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                (document_id, file_name, company, document_type, version_label,
+                 version_date, page_count, supersedes_document_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """
         params = (
             doc.document_id,
-            doc.file_name, doc.company, doc.document_type, doc.version_label, doc.version_date, doc.page_count,
-            doc.document_id, doc.file_name, doc.company, doc.document_type, doc.version_label, doc.version_date, doc.page_count,
+            doc.file_name, doc.company, doc.document_type, doc.version_label,
+            doc.version_date, doc.page_count, doc.supersedes_document_id,
+            doc.document_id, doc.file_name, doc.company, doc.document_type,
+            doc.version_label, doc.version_date, doc.page_count, doc.supersedes_document_id,
         )
         cursor = self._conn.cursor()
         try:
@@ -94,16 +106,14 @@ class ChunkRepository:
         inserted = 0
         try:
             for chunk in rows:
-                # Snowflake connector cannot bind Python lists/strings to VECTOR columns
-                # via parameterized %s. Inline the float literal directly in the SQL;
-                # values are machine-generated floats so there is no injection risk.
-                # Snowflake does not allow VECTOR casts in VALUES clauses;
-                # use SELECT with the literal inlined for the embedding column.
                 vec = "[" + ",".join(str(float(v)) for v in chunk.embedding) + "]"
                 sql = f"""
                     INSERT INTO CHUNKS
-                        (chunk_id, document_id, page_number, chunk_index, chunk_text, token_count, embedding)
-                    SELECT %s, %s, %s, %s, %s, %s, {vec}::VECTOR(FLOAT, 384)
+                        (chunk_id, document_id, page_number, chunk_index, chunk_text,
+                         token_count, embedding, section_header, chunk_type, structured_content)
+                    SELECT %s, %s, %s, %s, %s, %s,
+                           {vec}::VECTOR(FLOAT, 384),
+                           %s, %s, %s
                 """
                 cursor.execute(
                     sql,
@@ -114,6 +124,9 @@ class ChunkRepository:
                         chunk.chunk_index,
                         chunk.chunk_text,
                         chunk.token_count,
+                        chunk.section_header,
+                        chunk.chunk_type,
+                        chunk.structured_content,
                     ),
                 )
                 inserted += 1
@@ -154,13 +167,17 @@ class ChunkRepository:
                 d.version_label,
                 c.page_number,
                 c.chunk_text,
-                VECTOR_COSINE_SIMILARITY(c.embedding, {vec}::VECTOR(FLOAT, 384)) AS similarity
+                VECTOR_COSINE_SIMILARITY(c.embedding, {vec}::VECTOR(FLOAT, 384)) AS similarity,
+                c.section_header,
+                c.chunk_type,
+                c.structured_content,
+                d.supersedes_document_id
             FROM CHUNKS c
             JOIN DOCUMENTS d ON c.document_id = d.document_id
         """
         params: list = []
         if company_filter:
-            base_sql += " WHERE d.company = %s"
+            base_sql += " WHERE UPPER(d.company) = UPPER(%s)"
             params.append(company_filter)
         base_sql += " ORDER BY similarity DESC LIMIT %s"
         params.append(top_k)
@@ -186,9 +203,105 @@ class ChunkRepository:
                 page_number=row[5],
                 chunk_text=row[6],
                 similarity=float(row[7]),
+                section_header=row[8],
+                chunk_type=row[9] or "body",
+                structured_content=row[10],
+                supersedes_document_id=row[11],
             )
             for row in rows
         ]
+
+    def get_all_chunks(self) -> list[RetrievedChunk]:
+        """Load every chunk (no embeddings) for BM25 corpus construction."""
+        sql = """
+            SELECT
+                c.chunk_id,
+                c.document_id,
+                d.file_name,
+                d.company,
+                d.version_label,
+                c.page_number,
+                c.chunk_text,
+                c.section_header,
+                c.chunk_type,
+                c.structured_content,
+                d.supersedes_document_id
+            FROM CHUNKS c
+            JOIN DOCUMENTS d ON c.document_id = d.document_id
+            ORDER BY c.chunk_id
+        """
+        cursor = self._conn.cursor()
+        try:
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+        except ProgrammingError as exc:
+            raise RepositoryError(f"Failed to load BM25 corpus: {exc.msg}") from exc
+        finally:
+            cursor.close()
+
+        return [
+            RetrievedChunk(
+                chunk_id=row[0],
+                document_id=row[1],
+                file_name=row[2],
+                company=row[3],
+                version_label=row[4],
+                page_number=row[5],
+                chunk_text=row[6],
+                similarity=0.0,
+                section_header=row[7],
+                chunk_type=row[8] or "body",
+                structured_content=row[9],
+                supersedes_document_id=row[10],
+            )
+            for row in rows
+        ]
+
+    def get_all_documents(self) -> list[DocumentRecord]:
+        """Return all documents — used to compute version supersession relationships."""
+        sql = """
+            SELECT document_id, file_name, company, document_type,
+                   version_label, version_date, page_count, supersedes_document_id
+            FROM DOCUMENTS
+            ORDER BY company, version_date
+        """
+        cursor = self._conn.cursor()
+        try:
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+        except ProgrammingError as exc:
+            raise RepositoryError(f"Failed to list documents: {exc.msg}") from exc
+        finally:
+            cursor.close()
+
+        return [
+            DocumentRecord(
+                document_id=row[0],
+                file_name=row[1],
+                company=row[2],
+                document_type=row[3],
+                version_label=row[4],
+                version_date=row[5],
+                page_count=row[6],
+                supersedes_document_id=row[7],
+            )
+            for row in rows
+        ]
+
+    def set_supersedes(self, newer_document_id: str, older_document_id: str) -> None:
+        """Mark newer_document_id as superseding older_document_id."""
+        cursor = self._conn.cursor()
+        try:
+            cursor.execute(
+                "UPDATE DOCUMENTS SET supersedes_document_id = %s WHERE document_id = %s",
+                (older_document_id, newer_document_id),
+            )
+        except ProgrammingError as exc:
+            raise RepositoryError(
+                f"Failed to set supersedes relationship: {exc.msg}"
+            ) from exc
+        finally:
+            cursor.close()
 
     def list_companies(self) -> list[str]:
         cursor = self._conn.cursor()

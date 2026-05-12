@@ -1,10 +1,14 @@
-"""High-level retrieval orchestration: embed query -> search -> return ranked chunks."""
+"""Retrieval: embed query → vector search → optional cross-encoder rerank."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from insightlens.embeddings.embedder import Embedder
+from insightlens.retrieval.reranker import Reranker
 from insightlens.storage.chunk_repository import ChunkRepository, RetrievedChunk
+
+# Retrieve 3× more candidates than needed so the reranker has room to work.
+_CANDIDATE_MULTIPLIER = 3
 
 
 class RetrievalError(Exception):
@@ -16,14 +20,23 @@ class RetrievalRequest:
     query: str
     top_k: int
     company_filter: str | None = None
+    # Optional explicit type preference — overrides auto-detection.
+    # e.g. ("financial_table",) to restrict scoring boost to table chunks only.
+    preferred_chunk_types: tuple[str, ...] | None = None
 
 
 class VectorSearchService:
-    """Coordinates query embedding and vector lookup."""
+    """Coordinates query embedding, vector lookup, and optional reranking."""
 
-    def __init__(self, embedder: Embedder, repository: ChunkRepository) -> None:
+    def __init__(
+        self,
+        embedder: Embedder,
+        repository: ChunkRepository,
+        reranker: Reranker | None = None,
+    ) -> None:
         self._embedder = embedder
         self._repository = repository
+        self._reranker = reranker
 
     def retrieve(self, request: RetrievalRequest) -> list[RetrievedChunk]:
         if not request.query.strip():
@@ -32,8 +45,17 @@ class VectorSearchService:
             raise RetrievalError(f"top_k must be positive, got {request.top_k}")
 
         query_vector = self._embedder.embed_query(request.query)
-        return self._repository.search_similar(
+
+        # When a reranker is active, over-fetch candidates so reranker can pick the best.
+        candidate_k = request.top_k * _CANDIDATE_MULTIPLIER if self._reranker else request.top_k
+
+        chunks = self._repository.search_similar(
             query_embedding=query_vector,
-            top_k=request.top_k,
+            top_k=candidate_k,
             company_filter=request.company_filter,
         )
+
+        if self._reranker and chunks:
+            chunks = self._reranker.rerank(request.query, chunks, request.top_k)
+
+        return chunks

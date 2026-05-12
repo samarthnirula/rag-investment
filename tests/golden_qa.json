@@ -1,0 +1,107 @@
+[
+  {
+    "id": "dlr-01",
+    "question": "What is Digital Realty's data center development pipeline capacity?",
+    "expected_company": "Digital",
+    "expected_keywords": ["megawatt", "MW", "pipeline", "development", "colocation"],
+    "notes": "Should retrieve from the development pipeline slide in Digital Realty deck"
+  },
+  {
+    "id": "dlr-02",
+    "question": "What was Digital Realty's total revenue in the most recent quarter?",
+    "expected_company": "Digital",
+    "expected_keywords": ["revenue", "million", "quarter", "billion"],
+    "notes": "Should pull from financial results slide; test version awareness if both Dec-25 and Mar-26 decks retrieved"
+  },
+  {
+    "id": "dlr-03",
+    "question": "How many data centers does Digital Realty operate globally?",
+    "expected_company": "Digital",
+    "expected_keywords": ["data center", "portfolio", "global", "markets", "campus"],
+    "notes": "Portfolio overview slide"
+  },
+  {
+    "id": "bxp-01",
+    "question": "What is BXP's occupancy rate for its office portfolio?",
+    "expected_company": "Bxp",
+    "expected_keywords": ["occupancy", "leased", "percent", "%"],
+    "notes": "Leasing statistics slide in BXP Q4 deck"
+  },
+  {
+    "id": "bxp-02",
+    "question": "What was BXP's FFO per share guidance for the full year?",
+    "expected_company": "Bxp",
+    "expected_keywords": ["FFO", "per share", "guidance", "full year"],
+    "notes": "Financial guidance slide; FFO is a key REIT metric"
+  },
+  {
+    "id": "psa-01",
+    "question": "What is the strategic rationale for the PSA merger?",
+    "expected_company": "Psa",
+    "expected_keywords": ["merger", "acquisition", "strategic", "synergy", "accretive"],
+    "notes": "Merger presentation — rationale slide"
+  },
+  {
+    "id": "psa-02",
+    "question": "What is PSA's same-store revenue growth rate?",
+    "expected_company": "Psa",
+    "expected_keywords": ["same-store", "revenue", "growth", "NOI"],
+    "notes": "Financial highlights in PSA Company Update"
+  },
+  {
+    "id": "vici-01",
+    "question": "Who are VICI Properties' largest tenants?",
+    "expected_company": "Vici",
+    "expected_keywords": ["tenant", "Caesars", "MGM", "lease", "rent"],
+    "notes": "Tenant concentration slide in VICI deck"
+  },
+  {
+    "id": "vici-02",
+    "question": "What is VICI Properties' AFFO per share?",
+    "expected_company": "Vici",
+    "expected_keywords": ["AFFO", "per share", "adjusted", "funds from operations"],
+    "notes": "Financial metrics slide"
+  },
+  {
+    "id": "o-01",
+    "question": "How many properties does Realty Income own?",
+    "expected_company": "Realty",
+    "expected_keywords": ["properties", "portfolio", "net lease", "tenants"],
+    "notes": "Portfolio overview in Realty Income Q4 deck"
+  },
+  {
+    "id": "o-02",
+    "question": "What is Realty Income's dividend yield or monthly dividend amount?",
+    "expected_company": "Realty",
+    "expected_keywords": ["dividend", "monthly", "yield", "per share"],
+    "notes": "Dividend history slide — Realty Income is known as 'The Monthly Dividend Company'"
+  },
+  {
+    "id": "egp-01",
+    "question": "What markets does EastGroup Properties focus on?",
+    "expected_company": "Egp",
+    "expected_keywords": ["Sunbelt", "industrial", "market", "distribution"],
+    "notes": "Geographic focus slide in EGP roadshow"
+  },
+  {
+    "id": "simon-01",
+    "question": "What is Simon Property Group's view on the impact of e-commerce on physical retail?",
+    "expected_company": "Simon",
+    "expected_keywords": ["e-commerce", "retail", "online", "brick", "physical", "shopping"],
+    "notes": "Core thesis of the Simon 'Impact of Brick and Mortar' deck"
+  },
+  {
+    "id": "simon-02",
+    "question": "What are Simon Property Group's key financial metrics for mall performance?",
+    "expected_company": "Simon",
+    "expected_keywords": ["sales per square foot", "occupancy", "NOI", "mall"],
+    "notes": "Financial performance metrics slide"
+  },
+  {
+    "id": "cross-01",
+    "question": "Compare the dividend yields across different REITs in the corpus.",
+    "expected_company": null,
+    "expected_keywords": ["dividend", "yield", "percent"],
+    "notes": "Cross-document query — tests retrieval across companies"
+  }
+]

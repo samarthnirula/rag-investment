@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import sys
+from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
 from insightlens.config import RAW_PDF_DIR, ConfigError, load_config
 from insightlens.embeddings.embedder import EmbeddingError, Embedder
-from insightlens.ingestion.chunker import ChunkingError, RecursiveTokenChunker
+from insightlens.ingestion.chunker import ChunkingError, SlideAwareChunker
 from insightlens.ingestion.document_metadata import extract_metadata
 from insightlens.ingestion.pdf_parser import PDFParsingError, parse_pdf
 from insightlens.storage.chunk_repository import (
@@ -32,7 +34,7 @@ def _chunk_id(document_id: str, chunk_index: int) -> str:
 
 def _process_pdf(
     path: Path,
-    chunker: RecursiveTokenChunker,
+    chunker: SlideAwareChunker,
     embedder: Embedder,
     repository: ChunkRepository,
 ) -> int:
@@ -56,37 +58,54 @@ def _process_pdf(
         )
     )
 
-    chunks_with_meta: list[tuple[str, int, int, int]] = []
-    running_index = 0
-    for page in parsed.pages:
-        page_chunks = chunker.chunk_page(page.text, page.page_number, running_index)
-        for chunk in page_chunks:
-            chunks_with_meta.append((chunk.text, chunk.page_number, chunk.chunk_index, chunk.token_count))
-            running_index += 1
+    # SlideAwareChunker processes the entire document at once, respecting slide boundaries.
+    slide_chunks = chunker.chunk_document(parsed.pages)
 
-    if not chunks_with_meta:
+    if not slide_chunks:
         print(f"[ingest] {path.name} produced no chunks (empty or visual-only document)")
         return 0
 
-    print(f"[ingest] Embedding {len(chunks_with_meta)} chunks from {path.name}")
-    embeddings = embedder.embed_texts([text for text, _, _, _ in chunks_with_meta])
+    print(f"[ingest] Embedding {len(slide_chunks)} chunks from {path.name}")
+    embeddings = embedder.embed_texts([c.text for c in slide_chunks])
 
     records = [
         ChunkRecord(
-            chunk_id=_chunk_id(document_id, chunk_index),
+            chunk_id=_chunk_id(document_id, chunk.chunk_index),
             document_id=document_id,
-            page_number=page_number,
-            chunk_index=chunk_index,
-            chunk_text=text,
-            token_count=token_count,
+            page_number=chunk.page_number,
+            chunk_index=chunk.chunk_index,
+            chunk_text=chunk.text,
+            token_count=chunk.token_count,
             embedding=result.vector,
+            section_header=chunk.section_header,
+            chunk_type=chunk.chunk_type,
+            structured_content=chunk.structured_content,
         )
-        for (text, page_number, chunk_index, token_count), result in zip(chunks_with_meta, embeddings, strict=True)
+        for chunk, result in zip(slide_chunks, embeddings, strict=True)
     ]
 
     inserted = repository.insert_chunks(records)
     print(f"[ingest] Inserted {inserted} chunks for {path.name}")
     return inserted
+
+
+def _set_document_relationships(repository: ChunkRepository) -> None:
+    """For each company with multiple documents, mark the newer one as superseding the older."""
+    docs = repository.get_all_documents()
+    by_company: dict[str, list[DocumentRecord]] = defaultdict(list)
+    for doc in docs:
+        if doc.company:
+            by_company[doc.company].append(doc)
+
+    for company, company_docs in by_company.items():
+        # Sort by version_date; docs without a date go last (treat as oldest)
+        sorted_docs = sorted(company_docs, key=lambda d: d.version_date or date.min)
+        for i in range(1, len(sorted_docs)):
+            newer = sorted_docs[i]
+            older = sorted_docs[i - 1]
+            if newer.version_date and older.version_date and newer.version_date != older.version_date:
+                repository.set_supersedes(newer.document_id, older.document_id)
+                print(f"[ingest] {company}: {newer.file_name} supersedes {older.file_name}")
 
 
 def main() -> int:
@@ -101,7 +120,7 @@ def main() -> int:
         print(f"[ingest] No PDFs found in {RAW_PDF_DIR}", file=sys.stderr)
         return 1
 
-    chunker = RecursiveTokenChunker(
+    chunker = SlideAwareChunker(
         chunk_size_tokens=cfg.chunk_size_tokens,
         overlap_tokens=cfg.chunk_overlap_tokens,
     )
@@ -127,6 +146,10 @@ def main() -> int:
                 except RepositoryError as exc:
                     print(f"[ingest] Database write failed for {path.name}: {exc}", file=sys.stderr)
                     return 1
+
+            print("[ingest] Setting document version relationships...")
+            _set_document_relationships(repository)
+
     except SnowflakeConnectionError as exc:
         print(f"[ingest] {exc}", file=sys.stderr)
         return 1

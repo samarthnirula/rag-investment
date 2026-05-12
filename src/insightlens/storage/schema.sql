@@ -3,23 +3,33 @@ USE DATABASE INSIGHTLENS;
 USE SCHEMA PUBLIC;
 
 CREATE TABLE IF NOT EXISTS DOCUMENTS (
-    document_id     VARCHAR PRIMARY KEY,
-    file_name       VARCHAR NOT NULL,
-    company         VARCHAR,
-    document_type   VARCHAR,
-    version_label   VARCHAR,
-    version_date    DATE,
-    page_count      INTEGER,
-    ingested_at     TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+    document_id            VARCHAR PRIMARY KEY,
+    file_name              VARCHAR NOT NULL,
+    company                VARCHAR,
+    document_type          VARCHAR,
+    version_label          VARCHAR,
+    version_date           DATE,
+    page_count             INTEGER,
+    supersedes_document_id VARCHAR,   -- points to the older doc this one replaces
+    ingested_at            TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 );
 
 CREATE TABLE IF NOT EXISTS CHUNKS (
-    chunk_id        VARCHAR PRIMARY KEY,
-    document_id     VARCHAR NOT NULL,
-    page_number     INTEGER NOT NULL,
-    chunk_index     INTEGER NOT NULL,
-    chunk_text      VARCHAR NOT NULL,
-    token_count     INTEGER,
-    embedding       VECTOR(FLOAT, 384),
+    chunk_id           VARCHAR PRIMARY KEY,
+    document_id        VARCHAR NOT NULL,
+    page_number        INTEGER NOT NULL,
+    chunk_index        INTEGER NOT NULL,
+    chunk_text         VARCHAR NOT NULL,
+    token_count        INTEGER,
+    embedding          VECTOR(FLOAT, 384),
+    section_header     VARCHAR,        -- slide title this chunk belongs to
+    chunk_type         VARCHAR DEFAULT 'body',  -- body | financial_table | chart_caption | title
+    structured_content VARCHAR,        -- JSON table data for financial_table chunks
     FOREIGN KEY (document_id) REFERENCES DOCUMENTS(document_id)
-)
+);
+
+-- ── Migration SQL (run once on an existing database) ──────────────────────────
+-- ALTER TABLE DOCUMENTS ADD COLUMN IF NOT EXISTS supersedes_document_id VARCHAR;
+-- ALTER TABLE CHUNKS ADD COLUMN IF NOT EXISTS section_header VARCHAR;
+-- ALTER TABLE CHUNKS ADD COLUMN IF NOT EXISTS chunk_type VARCHAR DEFAULT 'body';
+-- ALTER TABLE CHUNKS ADD COLUMN IF NOT EXISTS structured_content VARCHAR;
