@@ -194,12 +194,23 @@ class SlideAwareChunker:
         for page in pages:
             token_count = len(self._encoder.encode(page.text)) if page.text else 0
 
+            # Build effective text for this page: vision content first (so BM25 and
+            # the embedder see chart/map values), then the text-extracted content.
+            vision = getattr(page, "vision_text", None)
+            if vision:
+                effective_text = (
+                    f"[AI VISION EXTRACTION — chart/map/logo content]\n{vision}"
+                    + (f"\n\n{page.text}" if page.text.strip() else "")
+                ).strip()
+            else:
+                effective_text = page.text
+
             if token_count < self._TITLE_SLIDE_TOKEN_THRESHOLD and not pending_text:
                 # Title-only page: carry it forward to attach to the next content page
-                pending_text = page.text
+                pending_text = effective_text
                 pending_header = page.slide_title
             else:
-                full_text = (pending_text + "\n\n" + page.text).strip() if pending_text else page.text
+                full_text = (pending_text + "\n\n" + effective_text).strip() if pending_text else effective_text
                 header = pending_header if pending_header else page.slide_title
                 result.append((page.page_number, full_text, header, page.tables, page.is_likely_visual))
                 pending_text = ""

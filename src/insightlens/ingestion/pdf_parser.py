@@ -8,17 +8,37 @@ from pathlib import Path
 import fitz
 import pdfplumber
 
+from insightlens.ingestion.vision_extractor import extract_visual_content
+
+# Pages with fewer than this many characters are treated as visual-dominant
+# (image, logo, or chart fills the slide with minimal text).
+# Raised from 50 → 120 to catch pages with a short caption above an image.
+_VISUAL_CHAR_THRESHOLD = 120
+
+# Pages below this character count trigger a vision API call to extract
+# chart / map / logo content that text extraction cannot read.
+_VISION_CALL_THRESHOLD = 300
+
 # Lines that look like footnote markers or standalone page numbers should never
 # become a slide title (e.g. "(1)", "6", "Page 3").
 _TITLE_EXCLUDE_RE = re.compile(
     r"^\(?[\d]+\)?[\.\)]?\s*$|^page\s*\d+$", re.IGNORECASE
 )
 
-# Matches the start of a footnote line: "(1) text", "1. text", "1) text",
-# "* text", "† text".  Used to detect footnote lines in the bottom portion
-# of a slide's extracted text.
+# Matches the start of a footnote line. Patterns covered (B.1):
+#   (1) text  — parenthesised number
+#   1. text   — number + period
+#   1) text   — number + closing paren
+#   1 Capital — bare number + capital letter (common in REIT decks)
+#   (a) text  — letter footnote
+#   Note: / Notes: — table footnote block header
+#   * text / † text — symbol footnotes
 _FOOTNOTE_START_RE = re.compile(
-    r"^[\(\*†‡§¶]?\d+[\.\)]\s+\S|^\*\s+\S|^†\s+\S"
+    r"^[\(\*†‡§¶]?\d+[\.\)]\s+\S"   # (1), 1., 1)
+    r"|^\d+\s+[A-Z]"                 # 1 Capital
+    r"|^\([a-z]\)\s+\S"              # (a) text
+    r"|^[Nn]otes?:?\s+\S"           # Note: / Notes:
+    r"|^\*\s+\S|^†\s+\S"            # * text / † text
 )
 
 
@@ -34,6 +54,7 @@ class ParsedPage:
     is_likely_visual: bool
     slide_title: str | None = None
     tables: tuple = field(default_factory=tuple)  # tuple[tuple[tuple[str]]] — extracted tables
+    vision_text: str | None = None               # Claude vision extraction for chart/map/logo pages
 
 
 @dataclass(frozen=True)
@@ -108,14 +129,23 @@ def parse_pdf(path: Path) -> ParsedDocument:
                     if table
                 )
 
+                # Vision extraction: for sparse pages (likely chart/map/logo content)
+                # pass the rendered page image to Claude vision to read visual elements
+                # that text extraction cannot access (bar charts, geographic maps,
+                # tenant logo tables, etc.).
+                vision_text: str | None = None
+                if len(stripped) < _VISION_CALL_THRESHOLD:
+                    vision_text = extract_visual_content(page) or None
+
                 pages.append(
                     ParsedPage(
                         page_number=index + 1,
                         text=stripped,
                         char_count=len(stripped),
-                        is_likely_visual=len(stripped) < 50,
+                        is_likely_visual=len(stripped) < _VISUAL_CHAR_THRESHOLD,
                         slide_title=slide_title,
                         tables=tables,
+                        vision_text=vision_text,
                     )
                 )
     finally:

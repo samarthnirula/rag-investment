@@ -25,13 +25,20 @@ _VERSION_PATTERNS = [
 
 _DATE_PATTERN = re.compile(r"(20\d{2})[-_/](\d{1,2})[-_/](\d{1,2})")
 
-_DOC_TYPE_KEYWORDS = {
-    "investor_presentation": ["investor", "presentation", "deck", "pitch"],
-    "strategy": ["strategy", "strategic", "plan"],
-    "third_party_report": ["report", "analysis", "research"],
-    "annual_report": ["annual", "10-k", "10k"],
-    "quarterly": ["10-q", "10q", "quarterly"],
-}
+# Priority-ordered: first match wins.  More specific patterns must come before
+# catch-all ones ("Investor Presentation" must be last).
+_DOC_TYPE_PATTERNS: list[tuple[str, list[str]]] = [
+    ("Merger Presentation",   ["merger"]),
+    ("Investor Day",          ["morning session", "investor day"]),
+    ("Q4 Update",             ["q4 2025", "q4-2025", "q4_2025", "q4 2024", "q4-2024"]),
+    ("Quarterly Update",      ["10-q", "10q", "quarterly", "q1", "q2", "q3"]),
+    ("Roadshow",              ["roadshow"]),
+    ("Company Update",        ["company update", "company-update"]),
+    ("Annual Report",         ["annual", "10-k", "10k"]),
+    ("Third-Party Report",    ["impact of", "the impact", "brick and mortar"]),
+    ("Research Report",       ["report", "analysis", "research"]),
+    ("Investor Presentation", ["investor", "presentation", "deck", "pitch"]),
+]
 
 
 def extract_metadata(file_path: Path, first_page_text: str) -> DocumentMetadata:
@@ -84,7 +91,7 @@ def _detect_company(stem: str, first_page_text: str) -> str | None:
 
 def _detect_doc_type(haystack: str) -> str | None:
     lowered = haystack.lower()
-    for label, keywords in _DOC_TYPE_KEYWORDS.items():
+    for label, keywords in _DOC_TYPE_PATTERNS:
         if any(keyword in lowered for keyword in keywords):
             return label
     return None

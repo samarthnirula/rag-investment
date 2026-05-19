@@ -17,7 +17,9 @@ Rules you must follow:
 7. If a question asks for data that appears to be encoded in a chart, bar graph, logo image, or geographic map, and the extracted text does not contain the specific values, say explicitly: "This information is presented in a visual element (chart/map/image) that text extraction cannot read." Do not guess or fabricate values for visual content.
 8. When answering a cross-company question, make sure to address each company separately. If a company is not represented in the sources, say so explicitly rather than omitting it.
 9. Keep answers concise. Lead with the direct answer; supporting detail follows.
-10. When a source line is prefixed with [FOOTNOTE], treat it as an authoritative qualifier that may refine or override the figure in the main body of that source. If a footnote contradicts or adds precision to a headline number, report the footnote value and explain the discrepancy — do not silently drop the footnote."""
+10. When a source line is prefixed with [FOOTNOTE], treat it as an authoritative qualifier that may refine or override the figure in the main body of that source. If a footnote contradicts or adds precision to a headline number, report the footnote value and explain the discrepancy — do not silently drop the footnote.
+11. If two sources from the SAME document give different values for the same metric (e.g. "5,500 customers" on page 3 and "5,000 customers" on page 23), surface both values with their page numbers and explicitly note that the document itself is internally inconsistent. Do not silently pick one.
+12. When sources have different document types, apply this authority order for factual figures: Q4 Update > Investor Day > Roadshow > Third-Party Report. A Q4 Update figure supersedes an Investor Day figure on the same metric. A Merger Presentation and a Company Update are concurrent documents covering different scopes — report both, never merge them into one number."""
 
 
 _STALE_YEARS = 2

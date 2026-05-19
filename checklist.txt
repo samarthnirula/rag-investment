@@ -45,7 +45,7 @@ WHAT IS ALREADY DONE:
 
 WHAT STILL NEEDS TO BE DONE:
 
-[ ] B.1  Broaden the footnote detection regex to catch more real-world patterns
+[x] B.1  Broaden the footnote detection regex to catch more real-world patterns
     File: src/insightlens/ingestion/pdf_parser.py
     Current _FOOTNOTE_START_RE misses:
       - Superscript-style: lines beginning with a bare number like "1 " or "2 "
@@ -61,7 +61,7 @@ WHAT STILL NEEDS TO BE DONE:
         r"|^\*\s+\S|^†\s+\S"             # * text or † text
     Impact: Q7 (BXP 5.47% actual yield in footnote 2), Q8 (DLR methodology note)
 
-[ ] B.2  Add a prompt rule for intra-document inconsistency
+[x] B.2  Add a prompt rule for intra-document inconsistency
     File: src/insightlens/generation/prompts.py
     Add as rule 11 after the existing rule 10:
       "11. If two sources from the SAME document give different values for the
@@ -70,7 +70,7 @@ WHAT STILL NEEDS TO BE DONE:
            the document itself is internally inconsistent. Do not silently pick one."
     Impact: Q5 (DLR 5,500 vs 5,000 customer count discrepancy across pages)
 
-[ ] B.3  Increase default top_k to surface both conflicting pages
+[x] B.3  Increase default top_k to surface both conflicting pages
     File: src/insightlens/ui/streamlit_app.py
     Change the slider default value from cfg.retrieval_top_k to 8 (minimum 6).
     Why: DLR page 3 and page 23 both need to rank in the top-K for the
@@ -108,7 +108,7 @@ WHAT IS ALREADY DONE:
 
 WHAT STILL NEEDS TO BE DONE:
 
-[ ] C.1  Improve document type labels — currently everything is "investor_presentation"
+[x] C.1  Improve document type labels — currently everything is "investor_presentation"
     File: src/insightlens/ingestion/document_metadata.py
     Problem: _DOC_TYPE_KEYWORDS is too coarse. Every PDF with "presentation" or
              "deck" in the name gets the same label "investor_presentation".
@@ -159,7 +159,7 @@ WHAT STILL NEEDS TO BE DONE:
              WHERE file_name LIKE '%Impact%' OR file_name LIKE '%Simon%';
          (This avoids a full re-ingest just for the label fix)
 
-[ ] C.3  Add prompt instruction for document-type authority ranking
+[x] C.3  Add prompt instruction for document-type authority ranking
     File: src/insightlens/generation/prompts.py
     Add as rule 12:
       "12. When sources have different document types, apply this authority order
@@ -186,7 +186,7 @@ WHAT STILL NEEDS TO BE DONE:
   This group requires the most significant new code: a vision extraction module
   that passes each PDF page to Claude's vision API during ingestion.
 
-[ ] D.1  Create vision extractor module
+[x] D.1  Create vision extractor module
     File to CREATE: src/insightlens/ingestion/vision_extractor.py
     What it does:
       - Takes a fitz.Page object (already available in pdf_parser.py)
@@ -211,13 +211,13 @@ WHAT STILL NEEDS TO BE DONE:
       - PyMuPDF fitz (already installed for pdf_parser.py)
       - No new pip dependencies needed
 
-[ ] D.2  Update ParsedPage dataclass to carry vision output
+[x] D.2  Update ParsedPage dataclass to carry vision output
     File: src/insightlens/ingestion/pdf_parser.py
     Add field to ParsedPage:
       vision_text: str | None = None
     This stores the Claude vision extraction result alongside the regular text.
 
-[ ] D.3  Call vision extractor from parse_pdf() for visual and sparse pages
+[x] D.3  Call vision extractor from parse_pdf() for visual and sparse pages
     File: src/insightlens/ingestion/pdf_parser.py
     Logic to add inside the page loop (after computing stripped and char_count):
       Call extract_visual_content() when EITHER:
@@ -229,7 +229,7 @@ WHAT STILL NEEDS TO BE DONE:
     ~20 visual pages, ingestion takes ~60s longer per document. This is acceptable
     for a one-time ingestion.
 
-[ ] D.4  Merge vision text into chunk text in the chunker
+[x] D.4  Merge vision text into chunk text in the chunker
     File: src/insightlens/ingestion/chunker.py
     In SlideAwareChunker.chunk_document(), when a page has vision_text:
       Prepend it to the chunk text with a clear label:
@@ -241,7 +241,7 @@ WHAT STILL NEEDS TO BE DONE:
     Also tag these chunks with chunk_type = "chart_caption" to keep them
     boosted for numeric queries.
 
-[ ] D.5  Pass anthropic_api_key through the ingestion pipeline
+[x] D.5  Pass anthropic_api_key through the ingestion pipeline
     File: src/insightlens/ingestion/pdf_parser.py (or wherever parse_pdf is called)
     The vision extractor needs the Anthropic API key. Options:
       Option A (simplest): read it from environment variable ANTHROPIC_API_KEY
@@ -280,7 +280,7 @@ WHAT STILL NEEDS TO BE DONE:
     actual AI-extracted content instead of near-empty chunks.
     No additional code beyond Group D — this is an automatic benefit of D.6.
 
-[ ] E.2  Improve is_likely_visual threshold
+[x] E.2  Improve is_likely_visual threshold
     File: src/insightlens/ingestion/pdf_parser.py
     Current threshold: char_count < 50 (very conservative — only catches pure
     logo pages or page-number-only pages).
@@ -312,7 +312,7 @@ WHAT IS ALREADY DONE:
 
 WHAT STILL NEEDS TO BE DONE:
 
-[ ] F.1  Add company coverage guarantee for cross-company queries
+[x] F.1  Add company coverage guarantee for cross-company queries
     File: src/insightlens/ui/streamlit_app.py
     Problem: Even with the per-doc quota, if VICI or Realty Income has no
              chunks in the top-K (because DLR still dominates vector space on
@@ -333,7 +333,7 @@ WHAT STILL NEEDS TO BE DONE:
     Impact: Q22 (AI demand across sectors — ensures PSA, VICI, Simon all appear
             even if they have few AI mentions), Q23 (VICI vs Realty Income gaming)
 
-[ ] F.2  Add company name normalization map
+[x] F.2  Add company name normalization map
     File: src/insightlens/ui/streamlit_app.py
     Problem: The query "compare VICI and Realty Income" contains "Realty Income"
              but the company stored in DB might be "Realty" (from filename

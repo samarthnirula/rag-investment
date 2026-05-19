@@ -95,7 +95,7 @@ with st.sidebar:
     )
     top_k = st.slider(
         "Sources per answer",
-        min_value=3, max_value=15, value=cfg.retrieval_top_k,
+        min_value=3, max_value=15, value=max(cfg.retrieval_top_k, 8),
         help="How many source chunks are retrieved and cited",
     )
     st.divider()
@@ -732,6 +732,80 @@ def _contextualize_query(raw: str, history: list[dict]) -> str:
     return f"Context: {prev_question}\nQuestion: {raw}"
 
 
+# ── Cross-company coverage guarantee ──────────────────────────────────────────
+# Maps common query spellings to the company name stored in Snowflake.
+_COMPANY_ALIASES: dict[str, str] = {
+    "realty income":  "Realty Income",
+    "digital realty": "Digital",
+    "public storage": "Psa",
+    "eastgroup":      "Egp",
+    "east group":     "Egp",
+    "simon property": "Simon",
+    "simon":          "Simon",
+    "bxp":            "Bxp",
+    "vici":           "Vici",
+    "dlr":            "Digital",
+}
+
+
+def _ensure_company_coverage(
+    query: str,
+    chunks: list[RetrievedChunk],
+    retrieval: HybridSearchService,
+) -> list[RetrievedChunk]:
+    """Guarantee every company mentioned in a cross-company query has ≥1 chunk.
+
+    After primary retrieval, if a company named in the query has zero chunks in
+    the result set, run a targeted secondary retrieval (top_k=2, company_filter
+    set to that company) and append those chunks so the LLM can address it.
+    """
+    if not companies:
+        return chunks
+
+    represented = {(c.company or "").lower() for c in chunks}
+    query_lower = query.lower()
+
+    # Build lookup: lowercased stored name → original stored name
+    company_lookup = {c.lower(): c for c in companies}
+
+    missing: list[str] = []
+    seen_missing: set[str] = set()
+
+    # Direct match against stored company names
+    for stored_lower, stored_name in company_lookup.items():
+        if stored_lower in query_lower and stored_lower not in represented:
+            if stored_lower not in seen_missing:
+                missing.append(stored_name)
+                seen_missing.add(stored_lower)
+
+    # Alias match (handles "Realty Income", "Digital Realty", etc.)
+    for alias, canonical in _COMPANY_ALIASES.items():
+        if alias in query_lower:
+            actual = company_lookup.get(canonical.lower(), canonical)
+            if actual.lower() not in represented and actual.lower() not in seen_missing:
+                missing.append(actual)
+                seen_missing.add(actual.lower())
+
+    if not missing:
+        return chunks
+
+    augmented = list(chunks)
+    seen_ids = {c.chunk_id for c in chunks}
+    for company_name in missing:
+        try:
+            secondary = retrieval.retrieve(
+                RetrievalRequest(query=query, top_k=2, company_filter=company_name)
+            )
+            for c in secondary:
+                if c.chunk_id not in seen_ids:
+                    augmented.append(c)
+                    seen_ids.add(c.chunk_id)
+        except Exception:
+            pass
+
+    return augmented
+
+
 if question:
     company_filter = None if company_choice == "All companies" else company_choice
 
@@ -762,6 +836,11 @@ if question:
                         company_filter=company_filter,
                     )
                 )
+
+                # For cross-company queries, ensure every mentioned company
+                # has at least one chunk — prevents single-doc domination.
+                if not company_filter:
+                    chunks = _ensure_company_coverage(retrieval_query, chunks, retrieval)
 
         user_prompt = build_user_prompt(question, chunks)
         # st.write_stream feeds the generator token-by-token into the UI
