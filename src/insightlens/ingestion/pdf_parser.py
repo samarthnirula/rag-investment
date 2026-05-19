@@ -14,6 +14,13 @@ _TITLE_EXCLUDE_RE = re.compile(
     r"^\(?[\d]+\)?[\.\)]?\s*$|^page\s*\d+$", re.IGNORECASE
 )
 
+# Matches the start of a footnote line: "(1) text", "1. text", "1) text",
+# "* text", "† text".  Used to detect footnote lines in the bottom portion
+# of a slide's extracted text.
+_FOOTNOTE_START_RE = re.compile(
+    r"^[\(\*†‡§¶]?\d+[\.\)]\s+\S|^\*\s+\S|^†\s+\S"
+)
+
 
 class PDFParsingError(Exception):
     """Raised when a PDF cannot be opened or parsed."""
@@ -43,6 +50,31 @@ class ParsedDocument:
         return "\n\n".join(page.text for page in self.pages)
 
 
+def _tag_footnotes(text: str) -> str:
+    """Prefix footnote lines with [FOOTNOTE] so retrieval can surface them precisely.
+
+    Footnotes in investment slide decks appear in the bottom ~25% of a slide's
+    text and often contain the authoritative qualifier for a figure shown in the
+    chart above (e.g., "actual market yield was 5.47%" contradicting the
+    normalized figure in the headline).  Tagging them allows BM25 to find them
+    when a query asks for a specific date-qualified or scope-qualified number, and
+    allows the LLM prompt to treat them as authoritative overrides.
+    """
+    lines = text.splitlines()
+    if len(lines) < 4:
+        return text
+    # Only scan the bottom quarter (at least the last 5 lines) for footnotes.
+    boundary = max(len(lines) * 3 // 4, len(lines) - 5)
+    result = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if i >= boundary and stripped and _FOOTNOTE_START_RE.match(stripped):
+            result.append(f"[FOOTNOTE] {line}")
+        else:
+            result.append(line)
+    return "\n".join(result)
+
+
 def parse_pdf(path: Path) -> ParsedDocument:
     """Extract text and tables from a PDF, one entry per page."""
     if not path.exists():
@@ -60,7 +92,7 @@ def parse_pdf(path: Path) -> ParsedDocument:
         with pdfplumber.open(path) as plumber_doc:
             for index, page in enumerate(document):
                 text = page.get_text("text") or ""
-                stripped = text.strip()
+                stripped = _tag_footnotes(text.strip())
                 slide_title = _extract_slide_title(stripped)
 
                 # Extract structured tables via pdfplumber (preserves row/column layout).

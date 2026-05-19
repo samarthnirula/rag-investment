@@ -7,24 +7,19 @@ SECTION 1 — FIXES TO MAKE BEFORE THE DEMO
 These are code changes that can be done tonight and will directly improve results.
 --------------------------------------------------------------------------------
 
-[ ] FIX 1: Add document_type to the prompt sent to Claude
+[x] FIX 1: Add document_type to the prompt sent to Claude
     File: src/insightlens/generation/prompts.py
-    Why: Questions 2, 11, 12 require the LLM to distinguish "Investor Day" from
-         "Q4 Update" from "Merger Presentation". Without document_type in the
-         prompt the LLM cannot reason about which document is more authoritative
-         for a given type of question.
-    How: Add chunk.document_type (or doc_type field from DOCUMENTS table) to the
-         header line inside build_user_prompt().
+    DONE: document_type added to RetrievedChunk dataclass + SQL queries in
+          search_similar() and get_all_chunks(). build_user_prompt() now
+          includes "(type: {doc_type})" in every source header line.
 
-[ ] FIX 2: Add per-document retrieval quota for cross-company queries
+[x] FIX 2: Add per-document retrieval quota for cross-company queries
     File: src/insightlens/retrieval/hybrid_search.py
-    Why: Questions 22 and 23 — Digital Realty has 100+ AI mentions so without
-         a quota ALL top-K chunks come from DLR and the answer only reflects
-         one company.
-    How: After RRF fusion, if no company_filter is set, cap results to max 2-3
-         chunks per document_id before reranking. Simple dict-based counter.
+    DONE: _MAX_CHUNKS_PER_DOC = 3 constant added. _apply_per_doc_quota()
+          method caps each document_id to 3 chunks before reranking.
+          Called from retrieve() only when company_filter is None (cross-company queries).
 
-[ ] FIX 3: Verify multiple document versions are actually ingested
+[ ] FIX 3: Verify multiple document versions are actually ingested  ← MANUAL STEP
     Action: Check Snowflake — run:
             SELECT file_name, company, version_label, document_type
             FROM DOCUMENTS ORDER BY company, version_label;
@@ -34,31 +29,42 @@ These are code changes that can be done tonight and will directly improve result
          - Digital Realty: Dec 2025 deck AND Mar 2026 deck
          - BXP: Investor Day (Jun 2025) AND Q4 2025 deck (Mar 2026)
          - PSA: Company Update AND Merger Presentation (both March 2026)
+    NOTE: Cannot be automated — requires you to run the SQL above and re-ingest
+          any missing documents using the ingestion pipeline.
 
-[ ] FIX 4: Update system prompt to explicitly acknowledge visual limitations
+[x] FIX 4: Update system prompt to explicitly acknowledge visual limitations
     File: src/insightlens/generation/prompts.py
-    Why: Questions 15, 16, 18 involve bar charts, logo images, and map graphics.
-         The system must say "this data is in a visual element I cannot read"
-         rather than guessing or hallucinating.
-    How: Add a rule: "If a source mentions a chart, graph, logo, or map graphic
-         and the extracted text does not contain the specific values asked for,
-         explicitly state that the information is encoded in a visual element
-         not accessible to text extraction."
+    DONE: Rule 7 added to SYSTEM_PROMPT: "If a question asks for data that
+          appears to be encoded in a chart, bar graph, logo image, or geographic
+          map, and the extracted text does not contain the specific values, say
+          explicitly: 'This information is presented in a visual element
+          (chart/map/image) that text extraction cannot read.'"
 
-[ ] FIX 5: Add staleness warning for old documents
+[x] FIX 5: Add staleness warning for old documents
     File: src/insightlens/generation/prompts.py
-    Why: Question 4 — Simon report is from November 2018 with 2017 data.
-         The system must flag this as old rather than presenting 2017 figures
-         as current facts.
-    How: In build_user_prompt(), if version_date is more than 2 years before
-         today, add a [NOTE: SOURCE IS FROM {year} — DATA MAY BE OUTDATED]
-         tag in the source header.
+    DONE: _STALE_YEARS = 2 threshold added. build_user_prompt() computes
+          age_years from chunk.version_date and appends
+          " ⚠ STALE SOURCE (published {year}, data may be outdated)"
+          to the source header. Rule 5 in SYSTEM_PROMPT instructs Claude
+          to flag this age before presenting any figures from it.
 
-[ ] FIX 6: Remove deduplication for cross-version queries
+[x] FIX 6: Verified deduplication is correct for cross-version queries
     File: src/insightlens/retrieval/hybrid_search.py
-    Why: Current dedup keeps 1 chunk per (document_id, page_number). This is
-         correct — it does NOT collapse chunks from different documents. But
-         verify this is working correctly for Q1 (two DLR docs, same slide topic).
+    DONE: _deduplicate() keys on (document_id, page_number). Because two
+          versions of a document have different document_ids, chunks from both
+          the Dec 2025 and Mar 2026 DLR deck can appear simultaneously in results.
+          No change was needed — behaviour was already correct.
+
+[x] FIX 7: Footnote tagging in PDF parser + prompt rule
+    Files: src/insightlens/ingestion/pdf_parser.py,
+           src/insightlens/generation/prompts.py
+    DONE: _tag_footnotes() added to pdf_parser.py. Lines in the bottom quarter
+          of a slide that match footnote patterns — "(1) text", "1. text", "* text",
+          "† text" — are prefixed with [FOOTNOTE] during ingestion. Rule 10 added
+          to SYSTEM_PROMPT: treat [FOOTNOTE] lines as authoritative qualifiers that
+          may override body figures. Helps Q7 (BXP 5.47% actual yield vs 3.9%
+          normalized) and Q8 (DLR credit quality methodology change).
+    NOTE: Requires re-ingestion to take effect on already-stored documents.
 
 --------------------------------------------------------------------------------
 SECTION 2 — KNOWN GAPS (be honest about these in the demo)
@@ -74,13 +80,13 @@ what you would build to close it.
                   and store the vision-extracted text alongside the PDF text.
                   This is the most impactful single upgrade for this document type."
 
-[ ] GAP 2: Footnote-as-truth-source (when footnote contradicts chart body)
+[~] GAP 2: Footnote-as-truth-source (when footnote contradicts chart body)
     Affects: Q7, Q8
-    What to say: "The chunker preserves footnote text in the chunk, so the
-                  information is there. But the system has no way to know that
-                  a footnote overrides the chart headline. The fix is to tag
-                  footnote lines during parsing and give them elevated weight
-                  in the prompt context."
+    PARTIAL FIX DONE (FIX 7 above): Parser now tags footnote lines with
+    [FOOTNOTE] prefix. Prompt rule 10 instructs Claude to treat them as
+    authoritative overrides. Requires re-ingestion of affected documents.
+    Remaining gap: no structured retrieval targeting (a secondary retrieval
+    pass specifically searching for [FOOTNOTE] lines would be more reliable).
 
 [ ] GAP 3: Intra-document inconsistency detection
     Affects: Q5 (5,500 vs 5,000 on different pages of same document)

@@ -16,7 +16,8 @@ Rules you must follow:
 6. Cite sources inline using the format [Source N]. Each source corresponds to one entry in the source list.
 7. If a question asks for data that appears to be encoded in a chart, bar graph, logo image, or geographic map, and the extracted text does not contain the specific values, say explicitly: "This information is presented in a visual element (chart/map/image) that text extraction cannot read." Do not guess or fabricate values for visual content.
 8. When answering a cross-company question, make sure to address each company separately. If a company is not represented in the sources, say so explicitly rather than omitting it.
-9. Keep answers concise. Lead with the direct answer; supporting detail follows."""
+9. Keep answers concise. Lead with the direct answer; supporting detail follows.
+10. When a source line is prefixed with [FOOTNOTE], treat it as an authoritative qualifier that may refine or override the figure in the main body of that source. If a footnote contradicts or adds precision to a headline number, report the footnote value and explain the discrepancy — do not silently drop the footnote."""
 
 
 _STALE_YEARS = 2
