@@ -1,0 +1,367 @@
+================================================================================
+INSIGHTLENS — DEMO READINESS CHECKLIST
+Vectera RAG Self-Evaluation Battery (24 questions)
+================================================================================
+
+SECTION 1 — FIXES TO MAKE BEFORE THE DEMO
+These are code changes that can be done tonight and will directly improve results.
+--------------------------------------------------------------------------------
+
+[ ] FIX 1: Add document_type to the prompt sent to Claude
+    File: src/insightlens/generation/prompts.py
+    Why: Questions 2, 11, 12 require the LLM to distinguish "Investor Day" from
+         "Q4 Update" from "Merger Presentation". Without document_type in the
+         prompt the LLM cannot reason about which document is more authoritative
+         for a given type of question.
+    How: Add chunk.document_type (or doc_type field from DOCUMENTS table) to the
+         header line inside build_user_prompt().
+
+[ ] FIX 2: Add per-document retrieval quota for cross-company queries
+    File: src/insightlens/retrieval/hybrid_search.py
+    Why: Questions 22 and 23 — Digital Realty has 100+ AI mentions so without
+         a quota ALL top-K chunks come from DLR and the answer only reflects
+         one company.
+    How: After RRF fusion, if no company_filter is set, cap results to max 2-3
+         chunks per document_id before reranking. Simple dict-based counter.
+
+[ ] FIX 3: Verify multiple document versions are actually ingested
+    Action: Check Snowflake — run:
+            SELECT file_name, company, version_label, document_type
+            FROM DOCUMENTS ORDER BY company, version_label;
+    Why: Questions 1, 2, 3, 6, 7, 8 all require TWO versions of the same
+         company's documents to be in the corpus simultaneously.
+    Required documents:
+         - Digital Realty: Dec 2025 deck AND Mar 2026 deck
+         - BXP: Investor Day (Jun 2025) AND Q4 2025 deck (Mar 2026)
+         - PSA: Company Update AND Merger Presentation (both March 2026)
+
+[ ] FIX 4: Update system prompt to explicitly acknowledge visual limitations
+    File: src/insightlens/generation/prompts.py
+    Why: Questions 15, 16, 18 involve bar charts, logo images, and map graphics.
+         The system must say "this data is in a visual element I cannot read"
+         rather than guessing or hallucinating.
+    How: Add a rule: "If a source mentions a chart, graph, logo, or map graphic
+         and the extracted text does not contain the specific values asked for,
+         explicitly state that the information is encoded in a visual element
+         not accessible to text extraction."
+
+[ ] FIX 5: Add staleness warning for old documents
+    File: src/insightlens/generation/prompts.py
+    Why: Question 4 — Simon report is from November 2018 with 2017 data.
+         The system must flag this as old rather than presenting 2017 figures
+         as current facts.
+    How: In build_user_prompt(), if version_date is more than 2 years before
+         today, add a [NOTE: SOURCE IS FROM {year} — DATA MAY BE OUTDATED]
+         tag in the source header.
+
+[ ] FIX 6: Remove deduplication for cross-version queries
+    File: src/insightlens/retrieval/hybrid_search.py
+    Why: Current dedup keeps 1 chunk per (document_id, page_number). This is
+         correct — it does NOT collapse chunks from different documents. But
+         verify this is working correctly for Q1 (two DLR docs, same slide topic).
+
+--------------------------------------------------------------------------------
+SECTION 2 — KNOWN GAPS (be honest about these in the demo)
+These cannot be fixed tonight. Prepare verbal answers explaining the gap and
+what you would build to close it.
+--------------------------------------------------------------------------------
+
+[ ] GAP 1: Vision/OCR for charts, bar graphs, logos, and map graphics
+    Affects: Q15, Q16, Q18
+    What to say: "Text extraction cannot read bar charts, logo images, or
+                  spatial map data. The fix is to pass each page as an image
+                  to a vision model (Claude claude-sonnet-4-6 vision) during ingestion
+                  and store the vision-extracted text alongside the PDF text.
+                  This is the most impactful single upgrade for this document type."
+
+[ ] GAP 2: Footnote-as-truth-source (when footnote contradicts chart body)
+    Affects: Q7, Q8
+    What to say: "The chunker preserves footnote text in the chunk, so the
+                  information is there. But the system has no way to know that
+                  a footnote overrides the chart headline. The fix is to tag
+                  footnote lines during parsing and give them elevated weight
+                  in the prompt context."
+
+[ ] GAP 3: Intra-document inconsistency detection
+    Affects: Q5 (5,500 vs 5,000 on different pages of same document)
+    What to say: "The prompt instructs Claude to show conflicting numbers
+                  separately, but retrieval only returns top-K chunks so it
+                  may not surface both pages. The fix is to run a secondary
+                  retrieval pass specifically looking for the same entity on
+                  different pages of the same document."
+
+[ ] GAP 4: Qualifier-aware chunking
+    Affects: Q10 (65M SF including development vs 65M SF under ownership)
+    What to say: "The chunker keeps each slide intact so the qualifier text
+                  is in the chunk. But embedding compression means the vector
+                  for both chunks looks similar. The fix is explicit scope
+                  tagging at ingestion time."
+
+[ ] GAP 5: Methodology-change detection in footnotes
+    Affects: Q8 (DLR credit quality — top-10 vs top-100 customers)
+    What to say: "This is the hardest class of RAG failure. The number looks
+                  the same (50-51%) but the measurement changed. No text-based
+                  system catches this without a structured fact-extraction layer
+                  that parses metric definitions, not just metric values."
+
+--------------------------------------------------------------------------------
+SECTION 3 — PREDICTED RESULTS FOR ALL 24 QUESTIONS
+--------------------------------------------------------------------------------
+
+GROUP A — Version & Temporal Awareness
+
+Q1:  What is Digital Realty's total IT capacity?
+     Predicted: PARTIAL
+     Correct answer: Two answers exist.
+       Dec 2025 deck: 2.9 GW in-place capacity + 730 MW under construction.
+       Mar 2026 deck: 3 GW in-place + 5 GW future pipeline = ~8 GW total.
+       The definitions of "total capacity" differ between the two decks.
+     Key risk: If only one deck is ingested, system returns one answer only.
+
+Q2:  What is BXP's projected 2026 occupancy?
+     Predicted: PARTIAL
+     Correct answer: Two answers exist.
+       Investor Day (Jun 2025): 87.25% to 88.0% range.
+       Q4 deck (Mar 2026): tightened to 88% point estimate (more recent).
+       The Q4 figure should be preferred as it post-dates the Investor Day.
+     Key risk: Without document_type in prompt, LLM may not know Q4 supersedes.
+
+Q3:  What changed in BXP's strategy between Investor Day and Q4 2025?
+     Predicted: PARTIAL-PASS
+     Correct answer: The strategic framework is unchanged. What advanced:
+       - Dividend reset was announced at Investor Day, completed by Q4.
+       - Occupancy guidance tightened to 88% point estimate.
+       - 2026 FFO guidance of $6.96/share midpoint became public.
+       - CBD share of NOI rose from 90.5% to 90.8%.
+
+Q4:  What is the economic impact of Simon's shopping centers on local communities?
+     Predicted: FAIL (staleness not flagged)
+     Correct answer: The Simon report is dated November 2018 using 2017 data —
+       roughly 7-8 years old. The system should answer the question but MUST
+       flag the age of this source prominently. Treating 2017 economic figures
+       as current facts is a material error.
+
+GROUP B — Intra-document Inconsistency & Footnote Awareness
+
+Q5:  How many customers does Digital Realty have?
+     Predicted: PARTIAL
+     Correct answer: The Mar 2026 deck itself is inconsistent.
+       Page 3 says 5,500+ customers.
+       Page 23 says 5,000+ global customers.
+       Both cite Dec 31, 2025 as the as-of date.
+       The Dec 2025 deck says 5,000+.
+       The system should surface both Mar 2026 page numbers and the inconsistency.
+
+Q6:  What is BXP's dividend yield?
+     Predicted: PARTIAL
+     Correct answer: Two answers depending on which document and stock price used.
+       Investor Day: 3.9% — calculated as post-reset $0.70 x 4 / Aug 2025 price.
+       Q4 deck: ~5.2% — same dividend but stock price moved lower by early 2026.
+       Same dividend rate, different yields because the stock price changed.
+
+Q7:  What was BXP's actual market dividend yield as of August 29, 2025?
+     Predicted: PARTIAL (footnote text is in chunk but may not be surfaced)
+     Correct answer: 5.47% — per footnote 2 on the Investor Day dividend slide.
+       This is the real market-implied figure. The 3.9% shown in the chart body
+       is a normalized post-reset construct, not the actual market yield on that date.
+       The footnote contradicts the chart headline.
+
+Q8:  How has Digital Realty's customer credit-quality profile changed?
+     Predicted: FAIL
+     Correct answer: The headline number looks stable at ~50-51% investment-grade.
+       But the measurement basis changed completely.
+       Dec 2025: top-10 customers / $4.5B revenue sample.
+       Mar 2026: top-100 customers / $6.1B revenue sample (10x expansion, 36% larger).
+       Comparing these two numbers as a trend is meaningless. The methodology changed.
+
+GROUP C — Document-type and Scope Distinctions
+
+Q9:  In how many countries does Realty Income operate?
+     Predicted: PARTIAL-PASS
+     Correct answer: Both answers are correct under different definitions.
+       10 countries total: US + UK + 8 European countries.
+       9 countries: the European footprint specifically (excluding the US).
+       The system should explain both with their scope qualifiers.
+
+Q10: How big is EastGroup's portfolio?
+     Predicted: PARTIAL
+     Correct answer: Two scopes exist in the same document.
+       ~65 million square feet including development projects and value-add
+       acquisitions in lease-up and under construction (page 3).
+       65 million square feet under ownership only (page 9).
+       The numbers look the same but the scope is different.
+
+Q11: What is Public Storage's NOI margin?
+     Predicted: PARTIAL
+     Correct answer: Depends which document and which entity scope.
+       PSA standalone: 78% NOI margin (Company Update, March 2026).
+       NSA standalone: 69% NOI margin (Merger Presentation, March 2026).
+       Pro-forma combined: 77% NOI margin (Merger Presentation).
+       Presenting "PSA's margin is 77%" is wrong — that is the post-merger figure.
+
+Q12: What is PSA's outlook for 2026?
+     Predicted: PARTIAL-PASS
+     Correct answer: Two additive (not contradictory) outlooks exist.
+       Organic standalone: revenue -2.2% to 0.0%, NOI -3.9% to -0.5%.
+       NSA acquisition impact: FFO-neutral in 2026, then $0.10-0.20 accretive
+       in 2027, growing to $0.35-0.50 at stabilization.
+       Both are true simultaneously — organic + deal impact.
+
+Q13: What percentage of BXP's portfolio is in CBD markets?
+     Predicted: PARTIAL
+     Correct answer: Three different answers, all correct, with different metrics.
+       90.5% of NOI as of Q2 2025 (Investor Day).
+       ~90% of Annualized Rental Obligations (Q4 deck page 7).
+       90.8% of NOI as of Q4 2025 (Q4 deck page 9).
+       The system must distinguish NOI vs ARO and the different as-of dates.
+
+Q14: What is the occupancy difference between PSA and NSA same-store?
+     Predicted: PARTIAL-PASS
+     Correct answer: PSA same-store occupancy: 92.0%.
+       NSA same-store occupancy: 84.3%.
+       Gap: 7.7 percentage points.
+       Combined pro-forma: 90.3%.
+       All from a 3-column comparison table in the Merger Presentation page 4.
+
+GROUP D — Chart, Table, and Map Parsing (Vision-Required)
+
+Q15: Self-storage REIT same-store NOI growth and margin?
+     Predicted: FAIL
+     Correct answer: Data is in a 2x3 grid of bar charts on PSA page 7.
+       The legend order is fixed (PSA / CubeSmart / Extra Space / NSA) but
+       each subchart re-sorts bars by performance ranking, so the order changes
+       per subchart. Text extraction cannot reliably map values to companies.
+       Honest answer: flag this as visual content that cannot be read from text.
+
+Q16: Who is VICI's largest tenant by rent percentage?
+     Predicted: PARTIAL
+     Correct answer: Caesars is the largest at approximately 39% of rent.
+       MGM Grand is second at approximately 34%.
+       The tenant table on page 7 uses logo images for names (not readable from
+       text) but the percentages are text. Caesars and MGM are named on pages
+       5, 13, and 14 in body text and can be cross-referenced.
+
+Q17: What are VICI's 10 Las Vegas Strip trophy assets?
+     Predicted: PARTIAL
+     Correct answer: Page 14 map only yields "MGM Grand" from text extraction.
+       Cross-referencing pages 13 and 16 reveals in body text:
+       Caesars Palace, Venetian Resort Las Vegas, MGM Grand, Mandalay Bay,
+       Park MGM, New York-New York, Excalibur, Luxor.
+       That is 8 names from text. The remaining assets are in the map graphic.
+       System should return what it found and note the map limitation.
+
+Q18: What share of Realty Income's ABR comes from each US region vs Europe?
+     Predicted: PARTIAL (numbers extractable, region mapping may be off)
+     Correct answer: Data is on a geographic world map on page 15.
+       Text extraction yields the numbers but spatial adjacency is broken —
+       you get a jumbled sequence like "PACIFIC NORTHWEST 235 1.6% MIDWEST
+       4,002 20.3% NORTHEAST 1,036 9.2%..." without reliable pairing.
+       System should return the numbers it found and flag reduced fidelity.
+
+Q19: Which markets does EastGroup operate in, ranked by importance?
+     Predicted: PARTIAL-PASS
+     Correct answer: Page 8 has the state-level ABR breakdown (text-extractable):
+       Texas 35%, Florida 25%, California 15%, Arizona 8%, North Carolina 5%,
+       Other 12%.
+       Page 6 has city-level data on a dot-size map (not readable from text).
+       System should return page 8 data and note page 6 limitation.
+
+GROUP E — Ingestion Quality
+
+Q20: What is EastGroup's strategy for property selection?
+     Predicted: PARTIAL-PASS
+     Correct answer: Strategy content is on pages 3, 6, 9, 11.
+       The is_likely_visual filter (50 char threshold) should catch most of the
+       30 photo pages ("Mesa Gateway / Phoenix, AZ / 5" is ~30 chars).
+       Strategy: Sunbelt industrial markets, infill locations, functional
+       Class A product near major highways and population centers.
+
+Q21: What is BXP's key strategy?
+     Predicted: PARTIAL-PASS
+     Correct answer: From Investor Day page 50 "SUMMARY" slide:
+       Current Strengths: CBD-focused, life science/tech tenant base, strong
+       balance sheet, premier asset quality, experienced team.
+       Action Plan: Leasing, capital recycling, development, dividend reset,
+       balance sheet optimization, ESG leadership.
+       The slide-aware chunker should keep this 2-column summary slide intact.
+
+GROUP F — Cross-Document Synthesis
+
+Q22: How is AI affecting demand across different real estate sectors?
+     Predicted: FAIL (no per-doc quota, DLR dominates)
+     Correct answer: Without retrieval diversification, all results come from
+       Digital Realty (100+ AI mentions). The balanced answer is:
+       - DLR: AI is driving 2.7x data center demand growth, powering new builds.
+       - BXP: AI favors CBD gateway markets for talent concentration.
+       - PSA: Uses AI as an internal efficiency tool, not a demand driver.
+       - VICI / Realty Income / Simon / EGP: Minimal AI content in their decks.
+
+Q23: How are VICI's and Realty Income's gaming portfolios different?
+     Predicted: PARTIAL
+     Correct answer: Fundamentally different exposures.
+       VICI: ~100% gaming and experiential. 54 gaming + 39 experiential properties.
+       Caesars = 39% of rent, MGM = 34%. Gaming is the entire thesis.
+       Realty Income: Gaming is one diversification segment among many
+       (retail, industrial, gaming, data centers, credit). Not a core concentration.
+
+Q24: What is the 2026 FFO outlook for each REIT in the corpus?
+     Predicted: PARTIAL-PASS (prompt forbids hallucination)
+     Correct answer: The system must distinguish what is and is not disclosed.
+       BXP: $6.96/share midpoint 2026 FFO guidance.
+       PSA standalone: Revenue -2.2% to 0.0%, NOI -3.9% to -0.5%.
+       PSA merger impact: FFO-neutral 2026, $0.10-0.20 accretive 2027.
+       VICI, Digital Realty, Realty Income, EastGroup, Simon:
+       2026 FFO/share guidance is NOT disclosed in their submitted documents.
+       The system must say "not found in sources" — not guess from training data.
+
+--------------------------------------------------------------------------------
+SECTION 4 — PREDICTED SCORE SUMMARY
+--------------------------------------------------------------------------------
+
+Pass (system gets it right):           ~4-5 questions
+Partial (correct but incomplete):      ~11-12 questions
+Fail (wrong or silent on key detail):  ~7-8 questions
+
+Strongest areas:
+  - Multi-document version attribution (Q3, Q12, Q21, Q24)
+  - Cross-page body-text synthesis (Q16, Q17, Q19)
+  - Content-density filtering for sparse pages (Q20)
+
+Biggest gaps:
+  - Vision/OCR for charts, logos, maps (Q15, Q16 partial, Q18)
+  - Cross-company retrieval diversification (Q22)
+  - Staleness detection from document content (Q4)
+  - Footnote-contradicts-headline detection (Q7, Q8)
+  - document_type not in prompt (Q2, Q11)
+
+--------------------------------------------------------------------------------
+SECTION 5 — WHAT TO SAY IN THE DEMO FOR THE GAPS
+--------------------------------------------------------------------------------
+
+For vision questions (Q15, Q16, Q18):
+  "The information is in a bar chart / logo image / geographic map that text
+   extraction cannot read. The fix I would build next is passing each page as
+   an image to Claude claude-sonnet-4-6 vision during ingestion and storing the
+   vision-extracted content alongside the PDF text. This is the single highest-
+   impact upgrade for investment document RAG."
+
+For staleness (Q4):
+  "The system retrieves the Simon content correctly but does not yet flag that
+   this is a 2018 document with 2017 data. The fix is to extract the publication
+   date from document content during ingestion, not just the filename, and add
+   a staleness warning in the prompt when the source is more than 2 years old."
+
+For cross-company dominance (Q22):
+  "Without per-document quotas, Digital Realty's 100+ AI mentions push all other
+   companies out of the top results. The fix is Maximal Marginal Relevance or
+   a simple per-document cap enforced before reranking."
+
+For footnote-contradicts-headline (Q7, Q8):
+  "The footnote text is preserved in the chunk. The system knows the information
+   is there. But it has no structured way to know that footnote 2 overrides the
+   chart headline. This requires a parsing layer that tags footnotes separately
+   and gives them elevated authority in the prompt."
+
+================================================================================
+END OF CHECKLIST
+================================================================================

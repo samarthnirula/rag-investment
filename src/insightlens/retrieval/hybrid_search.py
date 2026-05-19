@@ -32,6 +32,7 @@ from insightlens.storage.chunk_repository import ChunkRepository, RetrievedChunk
 _RRF_K = 60                   # dampens rank differences; 60 is the standard choice
 _SIMILARITY_THRESHOLD = 0.35  # cosine floor — vector candidates below this are dropped
 _CANDIDATE_MULTIPLIER = 3     # over-fetch before reranking
+_MAX_CHUNKS_PER_DOC = 3       # cross-company cap: no single document dominates top-K
 
 # Version-currency score multipliers.
 _VERSION_BOOST = 1.15
@@ -122,7 +123,14 @@ class HybridSearchService:
         # Strip scores — reranker and deduplicator work on chunk lists.
         fused = [chunk for chunk, _ in fused_scored]
 
-        # ── 6 & 7. Rerank → deduplicate ───────────────────────────────────────
+        # ── 6. Per-document quota (cross-company queries only) ─────────────────
+        # When no company filter is set, one document can dominate all top-K
+        # slots (e.g. Digital Realty with 100+ AI mentions on cross-sector
+        # queries). Cap each document to _MAX_CHUNKS_PER_DOC before reranking.
+        if not request.company_filter:
+            fused = self._apply_per_doc_quota(fused)
+
+        # ── 7 & 8. Rerank → deduplicate ───────────────────────────────────────
         if self._reranker and fused:
             reranked = self._reranker.rerank(request.query, fused, request.top_k * 2)
             return self._deduplicate(reranked)[: request.top_k]
@@ -282,6 +290,18 @@ class HybridSearchService:
                 result.append((chunk, score))
 
         result.sort(key=lambda x: x[1], reverse=True)
+        return result
+
+    def _apply_per_doc_quota(self, chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+        """Cap each document to _MAX_CHUNKS_PER_DOC to prevent one corpus-dominant
+        document from filling all top-K slots on cross-company queries."""
+        counts: dict[str, int] = {}
+        result: list[RetrievedChunk] = []
+        for chunk in chunks:
+            n = counts.get(chunk.document_id, 0)
+            if n < _MAX_CHUNKS_PER_DOC:
+                result.append(chunk)
+                counts[chunk.document_id] = n + 1
         return result
 
     def _deduplicate(self, chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:

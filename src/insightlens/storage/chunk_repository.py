@@ -50,6 +50,8 @@ class RetrievedChunk:
     chunk_type: str = "body"
     structured_content: str | None = None
     supersedes_document_id: str | None = None  # non-null → this doc is the newer version
+    document_type: str | None = None
+    version_date: date | None = None
 
 
 class RepositoryError(Exception):
@@ -171,7 +173,9 @@ class ChunkRepository:
                 c.section_header,
                 c.chunk_type,
                 c.structured_content,
-                d.supersedes_document_id
+                d.supersedes_document_id,
+                d.document_type,
+                d.version_date
             FROM CHUNKS c
             JOIN DOCUMENTS d ON c.document_id = d.document_id
         """
@@ -207,6 +211,8 @@ class ChunkRepository:
                 chunk_type=row[9] or "body",
                 structured_content=row[10],
                 supersedes_document_id=row[11],
+                document_type=row[12],
+                version_date=row[13],
             )
             for row in rows
         ]
@@ -225,7 +231,9 @@ class ChunkRepository:
                 c.section_header,
                 c.chunk_type,
                 c.structured_content,
-                d.supersedes_document_id
+                d.supersedes_document_id,
+                d.document_type,
+                d.version_date
             FROM CHUNKS c
             JOIN DOCUMENTS d ON c.document_id = d.document_id
             ORDER BY c.chunk_id
@@ -253,6 +261,8 @@ class ChunkRepository:
                 chunk_type=row[8] or "body",
                 structured_content=row[9],
                 supersedes_document_id=row[10],
+                document_type=row[11],
+                version_date=row[12],
             )
             for row in rows
         ]
