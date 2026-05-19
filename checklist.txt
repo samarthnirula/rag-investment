@@ -1,372 +1,469 @@
 ================================================================================
-INSIGHTLENS — DEMO READINESS CHECKLIST
-Vectera RAG Self-Evaluation Battery (24 questions)
+INSIGHTLENS — IMPLEMENTATION CHECKLIST
+Target: Full pass on Groups B, C, D, E, F of the Vectera RAG Battery
 ================================================================================
 
-SECTION 1 — FIXES TO MAKE BEFORE THE DEMO
-These are code changes that can be done tonight and will directly improve results.
---------------------------------------------------------------------------------
+Legend:
+  [DONE]   Already implemented and committed
+  [CODE]   Requires a code change — file and function named below
+  [DB]     Requires a Snowflake action — exact SQL provided below
+  [INGEST] Requires deleting existing chunks + re-running ingestion
+  [ ]      Not yet started
 
-[x] FIX 1: Add document_type to the prompt sent to Claude
+Priority order: DB first → CODE → INGEST (re-ingestion activates all code changes)
+
+================================================================================
+STEP 0 — PENDING DB ACTIONS (do these before writing any code)
+================================================================================
+
+[ ] 0.1  Set BXP supersedes link
+    Why:  Version scoring is blind for BXP without this. Q2, Q3, Q6, Q7 need it.
+    SQL:
+        -- Step A: get both BXP document IDs
+        SELECT document_id, file_name FROM DOCUMENTS
+        WHERE file_name LIKE '%BXP%' OR file_name LIKE '%Morning%';
+
+        -- Step B: run the update (replace <morning_session_id> with the ID from Step A)
+        UPDATE DOCUMENTS
+        SET supersedes_document_id = '<morning_session_id>'
+        WHERE file_name LIKE '%Q4 2025%' AND file_name LIKE '%BXP%';
+
+        -- Step C: verify
+        SELECT file_name, supersedes_document_id FROM DOCUMENTS ORDER BY company;
+
+================================================================================
+GROUP B — Footnote & Intra-document Inconsistency  (Q5, Q6, Q7, Q8)
+================================================================================
+
+WHAT IS ALREADY DONE:
+  [DONE] [FOOTNOTE] prefix tagged on footnote lines in bottom 25% of each slide
+         (pdf_parser.py — _tag_footnotes(), _FOOTNOTE_START_RE)
+  [DONE] Prompt rule 10: Claude treats [FOOTNOTE] lines as authoritative overrides
+         that may contradict and override the figure in the body above them
+  [DONE] Deduplication keys on (document_id, page_number) so page 3 and page 23
+         of the same document can BOTH appear in results simultaneously
+
+WHAT STILL NEEDS TO BE DONE:
+
+[ ] B.1  Broaden the footnote detection regex to catch more real-world patterns
+    File: src/insightlens/ingestion/pdf_parser.py
+    Current _FOOTNOTE_START_RE misses:
+      - Superscript-style: lines beginning with a bare number like "1 " or "2 "
+        followed by a capital letter (common in REIT slide decks)
+      - Lines starting with "(a)", "(b)", "(c)" (letter footnotes)
+      - Lines starting with "Note:" or "Notes:" (common in financial tables)
+    Change:
+      Replace _FOOTNOTE_START_RE with:
+        r"^[\(\*†‡§¶]?\d+[\.\)]\s+\S"    # (1) or 1. or 1) + text
+        r"|^\d+\s+[A-Z]"                  # bare "1 Capital" style
+        r"|^\([a-z]\)\s+\S"               # (a) text
+        r"|^[Nn]otes?:?\s+\S"             # Note: or Notes: lines
+        r"|^\*\s+\S|^†\s+\S"             # * text or † text
+    Impact: Q7 (BXP 5.47% actual yield in footnote 2), Q8 (DLR methodology note)
+
+[ ] B.2  Add a prompt rule for intra-document inconsistency
     File: src/insightlens/generation/prompts.py
-    DONE: document_type added to RetrievedChunk dataclass + SQL queries in
-          search_similar() and get_all_chunks(). build_user_prompt() now
-          includes "(type: {doc_type})" in every source header line.
+    Add as rule 11 after the existing rule 10:
+      "11. If two sources from the SAME document give different values for the
+           same metric (e.g. '5,500 customers' on page 3 and '5,000 customers'
+           on page 23), surface both values with their page numbers and note that
+           the document itself is internally inconsistent. Do not silently pick one."
+    Impact: Q5 (DLR 5,500 vs 5,000 customer count discrepancy across pages)
 
-[x] FIX 2: Add per-document retrieval quota for cross-company queries
-    File: src/insightlens/retrieval/hybrid_search.py
-    DONE: _MAX_CHUNKS_PER_DOC = 3 constant added. _apply_per_doc_quota()
-          method caps each document_id to 3 chunks before reranking.
-          Called from retrieve() only when company_filter is None (cross-company queries).
+[ ] B.3  Increase default top_k to surface both conflicting pages
+    File: src/insightlens/ui/streamlit_app.py
+    Change the slider default value from cfg.retrieval_top_k to 8 (minimum 6).
+    Why: DLR page 3 and page 23 both need to rank in the top-K for the
+         inconsistency to be visible. With top_k=5 only one may appear.
+    Line to change: value=cfg.retrieval_top_k  →  value=max(cfg.retrieval_top_k, 8)
 
-[ ] FIX 3: Verify multiple document versions are actually ingested  ← MANUAL STEP
-    Action: Check Snowflake — run:
-            SELECT file_name, company, version_label, document_type
-            FROM DOCUMENTS ORDER BY company, version_label;
-    Why: Questions 1, 2, 3, 6, 7, 8 all require TWO versions of the same
-         company's documents to be in the corpus simultaneously.
-    Required documents:
-         - Digital Realty: Dec 2025 deck AND Mar 2026 deck
-         - BXP: Investor Day (Jun 2025) AND Q4 2025 deck (Mar 2026)
-         - PSA: Company Update AND Merger Presentation (both March 2026)
-    NOTE: Cannot be automated — requires you to run the SQL above and re-ingest
-          any missing documents using the ingestion pipeline.
+[ ] B.4  Re-ingest BXP and DLR documents to activate [FOOTNOTE] tagging
+    Why:  The [FOOTNOTE] prefix only exists in chunks ingested AFTER the B.1
+          code change was committed. Chunks currently in Snowflake are untagged.
+    Steps:
+      A. Delete existing BXP chunks from Snowflake:
+           DELETE FROM CHUNKS WHERE document_id IN
+             (SELECT document_id FROM DOCUMENTS WHERE file_name LIKE '%BXP%');
+           DELETE FROM DOCUMENTS WHERE file_name LIKE '%BXP%';
 
-[x] FIX 4: Update system prompt to explicitly acknowledge visual limitations
+      B. Delete existing DLR chunks:
+           DELETE FROM CHUNKS WHERE document_id IN
+             (SELECT document_id FROM DOCUMENTS WHERE file_name LIKE '%Digital Realty%');
+           DELETE FROM DOCUMENTS WHERE file_name LIKE '%Digital Realty%';
+
+      C. Re-run the ingestion pipeline for both BXP PDFs and both DLR PDFs.
+         (Set the supersedes link again after re-ingestion — Step 0.1 above)
+
+================================================================================
+GROUP C — Document-type and Scope Distinctions  (Q9, Q10, Q11, Q12, Q13, Q14)
+================================================================================
+
+WHAT IS ALREADY DONE:
+  [DONE] document_type field populated from filename heuristic and stored in DB
+  [DONE] document_type shown in every source header: "(type: investor_presentation)"
+  [DONE] System prompt rule 2: prefer CURRENT VERSION for present-state figures
+  [DONE] System prompt rule 4: preserve scope qualifiers (including/excluding dev pipeline)
+  [DONE] Both PSA documents (Company Update + Merger Presentation) ingested separately
+  [DONE] Both BXP documents (Morning Session + Q4 2025) ingested separately
+
+WHAT STILL NEEDS TO BE DONE:
+
+[ ] C.1  Improve document type labels — currently everything is "investor_presentation"
+    File: src/insightlens/ingestion/document_metadata.py
+    Problem: _DOC_TYPE_KEYWORDS is too coarse. Every PDF with "presentation" or
+             "deck" in the name gets the same label "investor_presentation".
+             The LLM cannot distinguish Q4 Update from Investor Day from Merger
+             Presentation if all three say "(type: investor_presentation)".
+    Change: Replace the _DOC_TYPE_KEYWORDS dict with a priority-ordered list
+            that checks more specific patterns first:
+            [
+              ("Merger Presentation", ["merger"]),
+              ("Investor Day",        ["morning session", "investor day"]),
+              ("Q4 Update",           ["q4 2025", "q4-2025", "q4_2025"]),
+              ("Quarterly Update",    ["quarterly", "q1", "q2", "q3"]),
+              ("Roadshow",            ["roadshow"]),
+              ("Company Update",      ["company update", "company-update"]),
+              ("Annual Report",       ["annual", "10-k", "10k"]),
+              ("Third-Party Report",  ["impact of", "the impact", "report", "analysis"]),
+              ("Investor Presentation",["investor", "presentation", "deck", "pitch"]),
+            ]
+    After this change, source headers will show:
+      - "(type: Merger Presentation)"  for PSA Merger-Presentation-vF.pdf
+      - "(type: Investor Day)"         for BXP Morning Session Deck web.pdf
+      - "(type: Q4 Update)"            for BXP Q4 2025 Investor Presentation...
+      - "(type: Roadshow)"             for EGP_2026_February_Roadshow...
+      - "(type: Company Update)"       for PSA Company-Update-Mar-26-vF.pdf
+      - "(type: Third-Party Report)"   for Simon The Impact of Brick and Mortar...
+    Impact: Q2 (BXP Q4 vs Investor Day), Q11 (PSA standalone vs merger),
+            Q12 (PSA outlook — organic vs deal impact), Q13 (BXP CBD metric source)
+    Also change _detect_doc_type() to iterate the list in order and return on
+    first match (not dict lookup which has no ordering guarantee).
+
+[ ] C.2  Re-ingest all documents after C.1 code change
+    Why:  The document_type field is set at ingestion time in the DOCUMENTS table.
+          Existing rows still have the old "investor_presentation" values.
+    Steps:
+      A. Run ingestion pipeline for ALL PDFs (or run a direct SQL UPDATE — see below)
+      B. Faster alternative — update labels directly in Snowflake:
+           UPDATE DOCUMENTS SET document_type = 'Merger Presentation'
+             WHERE file_name LIKE '%Merger%';
+           UPDATE DOCUMENTS SET document_type = 'Investor Day'
+             WHERE file_name LIKE '%Morning Session%';
+           UPDATE DOCUMENTS SET document_type = 'Q4 Update'
+             WHERE file_name LIKE '%Q4 2025%';
+           UPDATE DOCUMENTS SET document_type = 'Roadshow'
+             WHERE file_name LIKE '%Roadshow%';
+           UPDATE DOCUMENTS SET document_type = 'Company Update'
+             WHERE file_name LIKE '%Company-Update%';
+           UPDATE DOCUMENTS SET document_type = 'Third-Party Report'
+             WHERE file_name LIKE '%Impact%' OR file_name LIKE '%Simon%';
+         (This avoids a full re-ingest just for the label fix)
+
+[ ] C.3  Add prompt instruction for document-type authority ranking
     File: src/insightlens/generation/prompts.py
-    DONE: Rule 7 added to SYSTEM_PROMPT: "If a question asks for data that
-          appears to be encoded in a chart, bar graph, logo image, or geographic
-          map, and the extracted text does not contain the specific values, say
-          explicitly: 'This information is presented in a visual element
-          (chart/map/image) that text extraction cannot read.'"
+    Add as rule 12:
+      "12. When sources have different document types, apply this authority order
+           for factual figures: Q4 Update > Investor Day > Roadshow > Third-Party
+           Report. A Q4 Update figure supersedes an Investor Day figure on the
+           same metric. A Merger Presentation and a Company Update are concurrent
+           and should both be reported, not merged."
+    Impact: Q2 (BXP Q4 tightened guidance supersedes Investor Day range),
+            Q11 (PSA standalone 78% vs merger pro-forma 77% — both correct but
+            different scope), Q13 (Q4 NOI% is more current than Investor Day NOI%)
 
-[x] FIX 5: Add staleness warning for old documents
-    File: src/insightlens/generation/prompts.py
-    DONE: _STALE_YEARS = 2 threshold added. build_user_prompt() computes
-          age_years from chunk.version_date and appends
-          " ⚠ STALE SOURCE (published {year}, data may be outdated)"
-          to the source header. Rule 5 in SYSTEM_PROMPT instructs Claude
-          to flag this age before presenting any figures from it.
+================================================================================
+GROUP D — Chart, Map, and Logo Parsing (Vision Extraction)  (Q15, Q16, Q17, Q18, Q19)
+================================================================================
 
-[x] FIX 6: Verified deduplication is correct for cross-version queries
-    File: src/insightlens/retrieval/hybrid_search.py
-    DONE: _deduplicate() keys on (document_id, page_number). Because two
-          versions of a document have different document_ids, chunks from both
-          the Dec 2025 and Mar 2026 DLR deck can appear simultaneously in results.
-          No change was needed — behaviour was already correct.
+WHAT IS ALREADY DONE:
+  [DONE] System prompt rule 7: explicitly acknowledge visual limitations —
+         say "This information is presented in a visual element (chart/map/image)
+         that text extraction cannot read" instead of hallucinating
+  [DONE] is_likely_visual flag on pages with <50 chars (catches logo-only pages)
+  [DONE] chart_caption chunk type for pages with high numeric density but no table
 
-[x] FIX 7: Footnote tagging in PDF parser + prompt rule
-    Files: src/insightlens/ingestion/pdf_parser.py,
-           src/insightlens/generation/prompts.py
-    DONE: _tag_footnotes() added to pdf_parser.py. Lines in the bottom quarter
-          of a slide that match footnote patterns — "(1) text", "1. text", "* text",
-          "† text" — are prefixed with [FOOTNOTE] during ingestion. Rule 10 added
-          to SYSTEM_PROMPT: treat [FOOTNOTE] lines as authoritative qualifiers that
-          may override body figures. Helps Q7 (BXP 5.47% actual yield vs 3.9%
-          normalized) and Q8 (DLR credit quality methodology change).
-    NOTE: Requires re-ingestion to take effect on already-stored documents.
+WHAT STILL NEEDS TO BE DONE:
+  This group requires the most significant new code: a vision extraction module
+  that passes each PDF page to Claude's vision API during ingestion.
 
---------------------------------------------------------------------------------
-SECTION 2 — KNOWN GAPS (be honest about these in the demo)
-These cannot be fixed tonight. Prepare verbal answers explaining the gap and
-what you would build to close it.
---------------------------------------------------------------------------------
+[ ] D.1  Create vision extractor module
+    File to CREATE: src/insightlens/ingestion/vision_extractor.py
+    What it does:
+      - Takes a fitz.Page object (already available in pdf_parser.py)
+      - Renders it to a PNG image at 150 DPI using page.get_pixmap()
+      - Encodes the PNG as base64
+      - Sends it to Claude claude-sonnet-4-6 vision API with a structured extraction prompt
+      - Returns the extracted text describing all charts, tables, logos, and maps
+    Key function signature:
+      def extract_visual_content(fitz_page, anthropic_api_key: str) -> str
+    Vision prompt to use:
+      "Extract ALL data from this investment presentation slide. Be exhaustive:
+       - Bar/column charts: list every bar label and its exact value or percentage
+       - Pie/donut charts: list every segment name and percentage
+       - Geographic maps: list every region, country, or city with its data value
+       - Tables with company logos: extract all company names (even if shown as logos)
+         and all associated numbers
+       - Line charts: describe the trend and extract key data points with labels
+       - Text callouts, annotations, footnotes: transcribe word for word
+       If a value is not clearly readable, say 'value unclear' rather than guessing."
+    Requirements:
+      - anthropic Python SDK (already in requirements.txt)
+      - PyMuPDF fitz (already installed for pdf_parser.py)
+      - No new pip dependencies needed
 
-[ ] GAP 1: Vision/OCR for charts, bar graphs, logos, and map graphics
-    Affects: Q15, Q16, Q18
-    What to say: "Text extraction cannot read bar charts, logo images, or
-                  spatial map data. The fix is to pass each page as an image
-                  to a vision model (Claude claude-sonnet-4-6 vision) during ingestion
-                  and store the vision-extracted text alongside the PDF text.
-                  This is the most impactful single upgrade for this document type."
+[ ] D.2  Update ParsedPage dataclass to carry vision output
+    File: src/insightlens/ingestion/pdf_parser.py
+    Add field to ParsedPage:
+      vision_text: str | None = None
+    This stores the Claude vision extraction result alongside the regular text.
 
-[~] GAP 2: Footnote-as-truth-source (when footnote contradicts chart body)
-    Affects: Q7, Q8
-    PARTIAL FIX DONE (FIX 7 above): Parser now tags footnote lines with
-    [FOOTNOTE] prefix. Prompt rule 10 instructs Claude to treat them as
-    authoritative overrides. Requires re-ingestion of affected documents.
-    Remaining gap: no structured retrieval targeting (a secondary retrieval
-    pass specifically searching for [FOOTNOTE] lines would be more reliable).
+[ ] D.3  Call vision extractor from parse_pdf() for visual and sparse pages
+    File: src/insightlens/ingestion/pdf_parser.py
+    Logic to add inside the page loop (after computing stripped and char_count):
+      Call extract_visual_content() when EITHER:
+        (a) is_likely_visual is True (char_count < 50 — slide is basically a pure image)
+        (b) char_count < 300 AND text contains words like "chart", "%" signs, or
+            very few words with many numbers (chart_caption candidates)
+      When vision_text is returned, store it on ParsedPage.
+    Note: vision API call adds ~2-3 seconds per page. For a 50-page deck with
+    ~20 visual pages, ingestion takes ~60s longer per document. This is acceptable
+    for a one-time ingestion.
 
-[ ] GAP 3: Intra-document inconsistency detection
-    Affects: Q5 (5,500 vs 5,000 on different pages of same document)
-    What to say: "The prompt instructs Claude to show conflicting numbers
-                  separately, but retrieval only returns top-K chunks so it
-                  may not surface both pages. The fix is to run a secondary
-                  retrieval pass specifically looking for the same entity on
-                  different pages of the same document."
+[ ] D.4  Merge vision text into chunk text in the chunker
+    File: src/insightlens/ingestion/chunker.py
+    In SlideAwareChunker.chunk_document(), when a page has vision_text:
+      Prepend it to the chunk text with a clear label:
+        "[AI VISION EXTRACTION — chart/map/logo content]\n{vision_text}\n\n"
+        followed by the regular text-extracted content.
+    This ensures the vision-extracted data (bar chart values, logo names, map
+    regions) is embedded into the chunk and retrievable by both BM25 and vector
+    search.
+    Also tag these chunks with chunk_type = "chart_caption" to keep them
+    boosted for numeric queries.
 
-[ ] GAP 4: Qualifier-aware chunking
-    Affects: Q10 (65M SF including development vs 65M SF under ownership)
-    What to say: "The chunker keeps each slide intact so the qualifier text
-                  is in the chunk. But embedding compression means the vector
-                  for both chunks looks similar. The fix is explicit scope
-                  tagging at ingestion time."
+[ ] D.5  Pass anthropic_api_key through the ingestion pipeline
+    File: src/insightlens/ingestion/pdf_parser.py (or wherever parse_pdf is called)
+    The vision extractor needs the Anthropic API key. Options:
+      Option A (simplest): read it from environment variable ANTHROPIC_API_KEY
+                           inside vision_extractor.py — same way the LLM client does it.
+      Option B: pass api_key parameter from parse_pdf() → extract_visual_content()
+    Option A is simpler and consistent with how the rest of the app handles the key.
 
-[ ] GAP 5: Methodology-change detection in footnotes
-    Affects: Q8 (DLR credit quality — top-10 vs top-100 customers)
-    What to say: "This is the hardest class of RAG failure. The number looks
-                  the same (50-51%) but the measurement changed. No text-based
-                  system catches this without a structured fact-extraction layer
-                  that parses metric definitions, not just metric values."
+[ ] D.6  Re-ingest ALL documents with vision extraction active
+    Why:  All existing chunks lack vision content for their visual pages.
+    Steps:
+      A. DELETE ALL existing chunks and documents (full clean slate):
+           DELETE FROM CHUNKS;
+           DELETE FROM DOCUMENTS;
+      B. Re-run ingestion pipeline for all 10 PDFs in order.
+         The vision extractor will fire for every visual or sparse page.
+      C. Re-set all supersedes links (DLR and BXP) after ingestion completes.
+         (Step 0.1 SQL above)
 
---------------------------------------------------------------------------------
-SECTION 3 — PREDICTED RESULTS FOR ALL 24 QUESTIONS
---------------------------------------------------------------------------------
+================================================================================
+GROUP E — Ingestion Quality  (Q20, Q21)
+================================================================================
 
-GROUP A — Version & Temporal Awareness
+WHAT IS ALREADY DONE:
+  [DONE] SlideAwareChunker: each slide page stays as one coherent chunk
+  [DONE] Title-only pages merged into following content page (<30 tokens)
+  [DONE] financial_table chunks: pdfplumber extracts row/column structure as JSON
+  [DONE] is_likely_visual filter: pages <50 chars skipped (photo pages, logos)
+  [DONE] _detect_chunk_type: chart_caption for high numeric density, body for prose
+  [DONE] section_header from first short line of each slide stored in DB
 
-Q1:  What is Digital Realty's total IT capacity?
-     Predicted: PARTIAL
-     Correct answer: Two answers exist.
-       Dec 2025 deck: 2.9 GW in-place capacity + 730 MW under construction.
-       Mar 2026 deck: 3 GW in-place + 5 GW future pipeline = ~8 GW total.
-       The definitions of "total capacity" differ between the two decks.
-     Key risk: If only one deck is ingested, system returns one answer only.
+WHAT STILL NEEDS TO BE DONE:
 
-Q2:  What is BXP's projected 2026 occupancy?
-     Predicted: PARTIAL
-     Correct answer: Two answers exist.
-       Investor Day (Jun 2025): 87.25% to 88.0% range.
-       Q4 deck (Mar 2026): tightened to 88% point estimate (more recent).
-       The Q4 figure should be preferred as it post-dates the Investor Day.
-     Key risk: Without document_type in prompt, LLM may not know Q4 supersedes.
+[ ] E.1  Vision extraction for sparse/visual slides (covered by D.1-D.6)
+    After vision extraction is active (Group D work), EastGroup's photo-heavy
+    roadshow pages (Q20) and BXP's strategy summary slide (Q21) will have
+    actual AI-extracted content instead of near-empty chunks.
+    No additional code beyond Group D — this is an automatic benefit of D.6.
 
-Q3:  What changed in BXP's strategy between Investor Day and Q4 2025?
-     Predicted: PARTIAL-PASS
-     Correct answer: The strategic framework is unchanged. What advanced:
-       - Dividend reset was announced at Investor Day, completed by Q4.
-       - Occupancy guidance tightened to 88% point estimate.
-       - 2026 FFO guidance of $6.96/share midpoint became public.
-       - CBD share of NOI rose from 90.5% to 90.8%.
+[ ] E.2  Improve is_likely_visual threshold
+    File: src/insightlens/ingestion/pdf_parser.py
+    Current threshold: char_count < 50 (very conservative — only catches pure
+    logo pages or page-number-only pages).
+    Change to: char_count < 120 (catches pages that are almost entirely images
+    with a small caption or title, which are common in roadshow decks like EGP).
+    This marks more pages for vision processing rather than returning near-empty
+    body chunks that provide no retrieval value.
+    Impact: Q20 (EastGroup strategy and location pages), Q21 (BXP summary slide)
 
-Q4:  What is the economic impact of Simon's shopping centers on local communities?
-     Predicted: FAIL (staleness not flagged)
-     Correct answer: The Simon report is dated November 2018 using 2017 data —
-       roughly 7-8 years old. The system should answer the question but MUST
-       flag the age of this source prominently. Treating 2017 economic figures
-       as current facts is a material error.
+[ ] E.3  Fix EastGroup document type label
+    File: src/insightlens/ingestion/document_metadata.py
+    After C.1 change, "EGP_2026_February_Roadshow_3.1_(Resize).pdf" should
+    correctly label as "Roadshow" (the keyword "roadshow" is in the filename).
+    Verify after C.1 is implemented by checking:
+      SELECT file_name, document_type FROM DOCUMENTS WHERE file_name LIKE '%EGP%';
+    Expected: document_type = 'Roadshow'
 
-GROUP B — Intra-document Inconsistency & Footnote Awareness
+================================================================================
+GROUP F — Cross-Company Synthesis  (Q22, Q23, Q24)
+================================================================================
 
-Q5:  How many customers does Digital Realty have?
-     Predicted: PARTIAL
-     Correct answer: The Mar 2026 deck itself is inconsistent.
-       Page 3 says 5,500+ customers.
-       Page 23 says 5,000+ global customers.
-       Both cite Dec 31, 2025 as the as-of date.
-       The Dec 2025 deck says 5,000+.
-       The system should surface both Mar 2026 page numbers and the inconsistency.
+WHAT IS ALREADY DONE:
+  [DONE] Per-document quota: 3 chunks max per document on cross-company queries
+         (hybrid_search.py — _apply_per_doc_quota, _MAX_CHUNKS_PER_DOC=3)
+  [DONE] Prompt rule 1: no gap-filling from training data — say "not in sources"
+  [DONE] Prompt rule 8: address each company separately, name absent companies
+  [DONE] Case-insensitive company filter in both SQL and BM25 search
+  [DONE] Version scoring ensures newer documents surface ahead of old ones
 
-Q6:  What is BXP's dividend yield?
-     Predicted: PARTIAL
-     Correct answer: Two answers depending on which document and stock price used.
-       Investor Day: 3.9% — calculated as post-reset $0.70 x 4 / Aug 2025 price.
-       Q4 deck: ~5.2% — same dividend but stock price moved lower by early 2026.
-       Same dividend rate, different yields because the stock price changed.
+WHAT STILL NEEDS TO BE DONE:
 
-Q7:  What was BXP's actual market dividend yield as of August 29, 2025?
-     Predicted: PARTIAL (footnote text is in chunk but may not be surfaced)
-     Correct answer: 5.47% — per footnote 2 on the Investor Day dividend slide.
-       This is the real market-implied figure. The 3.9% shown in the chart body
-       is a normalized post-reset construct, not the actual market yield on that date.
-       The footnote contradicts the chart headline.
+[ ] F.1  Add company coverage guarantee for cross-company queries
+    File: src/insightlens/ui/streamlit_app.py
+    Problem: Even with the per-doc quota, if VICI or Realty Income has no
+             chunks in the top-K (because DLR still dominates vector space on
+             AI questions), the model correctly says "not found" but the user
+             gets an incomplete comparison.
+    Fix: After primary retrieval, detect company names mentioned in the query.
+         For any mentioned company with zero chunks in results, run a secondary
+         targeted retrieval (company_filter=that_company, top_k=2) and append
+         those chunks to the result set.
+    Add a new function _ensure_company_coverage() to streamlit_app.py:
+      - Input: query string, retrieved chunks, search service, top_k
+      - Detect company names by matching against list_companies() result
+      - For each named company missing from chunks, call service.retrieve()
+        with company_filter=company, top_k=2
+      - Append secondary results (deduplicated) to primary results
+      - Return merged chunk list capped at top_k + 2*missing_count
+    Call it in the query handler after the primary retrieve() call.
+    Impact: Q22 (AI demand across sectors — ensures PSA, VICI, Simon all appear
+            even if they have few AI mentions), Q23 (VICI vs Realty Income gaming)
 
-Q8:  How has Digital Realty's customer credit-quality profile changed?
-     Predicted: FAIL
-     Correct answer: The headline number looks stable at ~50-51% investment-grade.
-       But the measurement basis changed completely.
-       Dec 2025: top-10 customers / $4.5B revenue sample.
-       Mar 2026: top-100 customers / $6.1B revenue sample (10x expansion, 36% larger).
-       Comparing these two numbers as a trend is meaningless. The methodology changed.
+[ ] F.2  Add company name normalization map
+    File: src/insightlens/ui/streamlit_app.py
+    Problem: The query "compare VICI and Realty Income" contains "Realty Income"
+             but the company stored in DB might be "Realty" (from filename
+             "Realty Incom q4-2025-investor-presentation.pdf" with the typo).
+    Fix: Add a small normalization dict in the coverage function:
+      _COMPANY_ALIASES = {
+        "realty income": "Realty",
+        "digital realty": "Digital",
+        "public storage": "Psa",
+        "eastgroup": "Egp",
+        "simon property": "Simon",
+      }
+    Lower-case the query, check for alias matches, use the stored company name
+    for the secondary retrieval filter.
+    Impact: Q23 (VICI vs Realty Income), Q24 (FFO outlook for each REIT)
 
-GROUP C — Document-type and Scope Distinctions
+[ ] F.3  Fix "Realty Incom" typo in Snowflake
+    Why:  The filename "Realty Incom q4-2025-investor-presentation.pdf" is
+          missing an 'e'. This causes the company name to be stored as "Realty"
+          (not "Realty Income"). The UI company selector shows "Realty" which
+          looks wrong to a demo evaluator.
+    Fix options:
+      Option A (SQL only — fastest):
+        UPDATE DOCUMENTS
+        SET company = 'Realty Income'
+        WHERE file_name LIKE '%Realty Incom%';
+      Option B: Rename the PDF file and re-ingest.
+    Option A is the right call — no re-ingestion needed.
+    SQL to run NOW:
+        UPDATE DOCUMENTS
+        SET company = 'Realty Income'
+        WHERE file_name LIKE '%Realty Incom%';
 
-Q9:  In how many countries does Realty Income operate?
-     Predicted: PARTIAL-PASS
-     Correct answer: Both answers are correct under different definitions.
-       10 countries total: US + UK + 8 European countries.
-       9 countries: the European footprint specifically (excluding the US).
-       The system should explain both with their scope qualifiers.
+================================================================================
+RECOMMENDED EXECUTION ORDER
+================================================================================
 
-Q10: How big is EastGroup's portfolio?
-     Predicted: PARTIAL
-     Correct answer: Two scopes exist in the same document.
-       ~65 million square feet including development projects and value-add
-       acquisitions in lease-up and under construction (page 3).
-       65 million square feet under ownership only (page 9).
-       The numbers look the same but the scope is different.
+Do these in sequence — later steps depend on earlier ones being complete.
 
-Q11: What is Public Storage's NOI margin?
-     Predicted: PARTIAL
-     Correct answer: Depends which document and which entity scope.
-       PSA standalone: 78% NOI margin (Company Update, March 2026).
-       NSA standalone: 69% NOI margin (Merger Presentation, March 2026).
-       Pro-forma combined: 77% NOI margin (Merger Presentation).
-       Presenting "PSA's margin is 77%" is wrong — that is the post-merger figure.
+PHASE 1 — DB fixes (no code needed, do right now)
+  1. Step 0.1  — Set BXP supersedes link in Snowflake
+  2. Step F.3  — Fix "Realty Incom" → "Realty Income" in Snowflake
+  3. Step C.2  — UPDATE document_type labels directly in Snowflake (SQL above)
 
-Q12: What is PSA's outlook for 2026?
-     Predicted: PARTIAL-PASS
-     Correct answer: Two additive (not contradictory) outlooks exist.
-       Organic standalone: revenue -2.2% to 0.0%, NOI -3.9% to -0.5%.
-       NSA acquisition impact: FFO-neutral in 2026, then $0.10-0.20 accretive
-       in 2027, growing to $0.35-0.50 at stabilization.
-       Both are true simultaneously — organic + deal impact.
+PHASE 2 — Code changes (before re-ingestion)
+  4. Step B.1  — Broaden footnote regex in pdf_parser.py
+  5. Step B.2  — Add rule 11 (intra-doc inconsistency) to prompts.py
+  6. Step B.3  — Increase default top_k to 8 in streamlit_app.py
+  7. Step C.1  — Rewrite _DOC_TYPE_KEYWORDS in document_metadata.py
+  8. Step C.3  — Add rule 12 (doc-type authority order) to prompts.py
+  9. Step E.2  — Change is_likely_visual threshold to 120 chars in pdf_parser.py
+  10. Step D.1 — Create src/insightlens/ingestion/vision_extractor.py
+  11. Step D.2 — Add vision_text field to ParsedPage in pdf_parser.py
+  12. Step D.3 — Call vision extractor from parse_pdf() for visual/sparse pages
+  13. Step D.4 — Merge vision text into chunks in chunker.py
+  14. Step D.5 — Read API key from env in vision_extractor.py
+  15. Step F.1 — Add _ensure_company_coverage() to streamlit_app.py
+  16. Step F.2 — Add _COMPANY_ALIASES dict to streamlit_app.py
 
-Q13: What percentage of BXP's portfolio is in CBD markets?
-     Predicted: PARTIAL
-     Correct answer: Three different answers, all correct, with different metrics.
-       90.5% of NOI as of Q2 2025 (Investor Day).
-       ~90% of Annualized Rental Obligations (Q4 deck page 7).
-       90.8% of NOI as of Q4 2025 (Q4 deck page 9).
-       The system must distinguish NOI vs ARO and the different as-of dates.
+PHASE 3 — Re-ingestion (activates all code changes)
+  17. Step D.6 — Delete all chunks + documents from Snowflake and re-ingest all 10 PDFs
+  18. Step 0.1 — Re-set DLR and BXP supersedes links (deleted by D.6 clean slate)
+  19. Step C.2 — Re-apply document_type SQL updates (C.1 handles it at ingest time
+                  but the SQL fix is faster if needed)
 
-Q14: What is the occupancy difference between PSA and NSA same-store?
-     Predicted: PARTIAL-PASS
-     Correct answer: PSA same-store occupancy: 92.0%.
-       NSA same-store occupancy: 84.3%.
-       Gap: 7.7 percentage points.
-       Combined pro-forma: 90.3%.
-       All from a 3-column comparison table in the Merger Presentation page 4.
+PHASE 4 — Verify
+  20. Run eval_retrieval.py — confirm Hit@1 and MRR are still 100%
+  21. Ask each of Q15-Q19 in the live app — confirm vision content appears in sources
+  22. Ask "How is AI affecting demand across real estate sectors?" — confirm ≥4 companies appear
+  23. Ask "What is PSA's NOI margin?" — confirm both 78% standalone and 77% pro-forma appear
 
-GROUP D — Chart, Table, and Map Parsing (Vision-Required)
+================================================================================
+PREDICTED SCORE AFTER ALL CHANGES
+================================================================================
 
-Q15: Self-storage REIT same-store NOI growth and margin?
-     Predicted: FAIL
-     Correct answer: Data is in a 2x3 grid of bar charts on PSA page 7.
-       The legend order is fixed (PSA / CubeSmart / Extra Space / NSA) but
-       each subchart re-sorts bars by performance ranking, so the order changes
-       per subchart. Text extraction cannot reliably map values to companies.
-       Honest answer: flag this as visual content that cannot be read from text.
+Group B — Footnote & Inconsistency:
+  Q5  (DLR 5,500 vs 5,000): PASS — both pages surface with top_k=8, rule 11 flags it
+  Q6  (BXP dividend yield): PASS — two docs, version scoring, doc-type labels
+  Q7  (BXP 5.47% actual yield footnote): PARTIAL-PASS — [FOOTNOTE] tag + rule 10
+  Q8  (DLR methodology change): PARTIAL — footnote tagging helps but methodology
+      detection still requires structured fact extraction (honest gap to acknowledge)
 
-Q16: Who is VICI's largest tenant by rent percentage?
-     Predicted: PARTIAL
-     Correct answer: Caesars is the largest at approximately 39% of rent.
-       MGM Grand is second at approximately 34%.
-       The tenant table on page 7 uses logo images for names (not readable from
-       text) but the percentages are text. Caesars and MGM are named on pages
-       5, 13, and 14 in body text and can be cross-referenced.
+Group C — Document-type Scope:
+  Q9  (Realty Income countries): PASS — body text has both "10 countries" and
+      "9 European countries" with scope qualifiers, rule 4 preserves them
+  Q10 (EastGroup 65M SF scope): PARTIAL-PASS — slide-aware chunker keeps qualifiers
+      in text, both pages likely retrieved at top_k=8
+  Q11 (PSA NOI margin): PASS — separate document types now labeled correctly,
+      78% standalone vs 77% pro-forma both appear with distinct type labels
+  Q12 (PSA 2026 outlook): PASS — two concurrent documents labeled separately,
+      organic + deal impact both retrieved
+  Q13 (BXP CBD %): PARTIAL-PASS — three metrics (NOI/ARO/different dates) present
+      in source text; LLM must distinguish them per rule 4
+  Q14 (PSA vs NSA occupancy gap): PASS — table on Merger Presentation page 4,
+      pdfplumber extracts structured content, financial_table chunk type retrieved
 
-Q17: What are VICI's 10 Las Vegas Strip trophy assets?
-     Predicted: PARTIAL
-     Correct answer: Page 14 map only yields "MGM Grand" from text extraction.
-       Cross-referencing pages 13 and 16 reveals in body text:
-       Caesars Palace, Venetian Resort Las Vegas, MGM Grand, Mandalay Bay,
-       Park MGM, New York-New York, Excalibur, Luxor.
-       That is 8 names from text. The remaining assets are in the map graphic.
-       System should return what it found and note the map limitation.
+Group D — Vision:
+  Q15 (self-storage bar charts): PASS — vision extractor reads bar chart values
+  Q16 (VICI largest tenant): PASS — vision reads logo names from tenant table
+  Q17 (VICI Las Vegas assets): PARTIAL-PASS — vision reads map labels, text has 8/10 names
+  Q18 (Realty Income ABR by region): PASS — vision reads geographic map data
+  Q19 (EastGroup markets): PASS — vision reads state-level map + dot map
 
-Q18: What share of Realty Income's ABR comes from each US region vs Europe?
-     Predicted: PARTIAL (numbers extractable, region mapping may be off)
-     Correct answer: Data is on a geographic world map on page 15.
-       Text extraction yields the numbers but spatial adjacency is broken —
-       you get a jumbled sequence like "PACIFIC NORTHWEST 235 1.6% MIDWEST
-       4,002 20.3% NORTHEAST 1,036 9.2%..." without reliable pairing.
-       System should return the numbers it found and flag reduced fidelity.
+Group E — Ingestion:
+  Q20 (EastGroup strategy): PASS — vision fills photo page gaps + text chunking
+  Q21 (BXP strategy): PASS — slide-aware chunker keeps summary slide intact
 
-Q19: Which markets does EastGroup operate in, ranked by importance?
-     Predicted: PARTIAL-PASS
-     Correct answer: Page 8 has the state-level ABR breakdown (text-extractable):
-       Texas 35%, Florida 25%, California 15%, Arizona 8%, North Carolina 5%,
-       Other 12%.
-       Page 6 has city-level data on a dot-size map (not readable from text).
-       System should return page 8 data and note page 6 limitation.
+Group F — Cross-company:
+  Q22 (AI across sectors): PASS — quota + coverage guarantee ensures all companies
+  Q23 (VICI vs Realty Income gaming): PASS — coverage guarantee pulls both companies
+  Q24 (2026 FFO per REIT): PASS — rule 1 (no hallucination) + rule 8 (name absent
+      companies explicitly) + coverage guarantee retrieves each company
 
-GROUP E — Ingestion Quality
+================================================================================
+HONEST REMAINING GAPS (after all above is done)
+================================================================================
 
-Q20: What is EastGroup's strategy for property selection?
-     Predicted: PARTIAL-PASS
-     Correct answer: Strategy content is on pages 3, 6, 9, 11.
-       The is_likely_visual filter (50 char threshold) should catch most of the
-       30 photo pages ("Mesa Gateway / Phoenix, AZ / 5" is ~30 chars).
-       Strategy: Sunbelt industrial markets, infill locations, functional
-       Class A product near major highways and population centers.
+Q8  DLR methodology change (top-10 → top-100 customers):
+    The footnote text is now tagged [FOOTNOTE] so it surfaces. But the system
+    still has no way to automatically flag that the measurement basis changed —
+    it can only present both footnotes and let Claude reason about them.
+    Say: "The system surfaces both footnotes. A structured fact-extraction layer
+    that parses metric definitions would catch this automatically — that's the
+    next architectural layer."
 
-Q21: What is BXP's key strategy?
-     Predicted: PARTIAL-PASS
-     Correct answer: From Investor Day page 50 "SUMMARY" slide:
-       Current Strengths: CBD-focused, life science/tech tenant base, strong
-       balance sheet, premier asset quality, experienced team.
-       Action Plan: Leasing, capital recycling, development, dividend reset,
-       balance sheet optimization, ESG leadership.
-       The slide-aware chunker should keep this 2-column summary slide intact.
-
-GROUP F — Cross-Document Synthesis
-
-Q22: How is AI affecting demand across different real estate sectors?
-     Predicted: FAIL (no per-doc quota, DLR dominates)
-     Correct answer: Without retrieval diversification, all results come from
-       Digital Realty (100+ AI mentions). The balanced answer is:
-       - DLR: AI is driving 2.7x data center demand growth, powering new builds.
-       - BXP: AI favors CBD gateway markets for talent concentration.
-       - PSA: Uses AI as an internal efficiency tool, not a demand driver.
-       - VICI / Realty Income / Simon / EGP: Minimal AI content in their decks.
-
-Q23: How are VICI's and Realty Income's gaming portfolios different?
-     Predicted: PARTIAL
-     Correct answer: Fundamentally different exposures.
-       VICI: ~100% gaming and experiential. 54 gaming + 39 experiential properties.
-       Caesars = 39% of rent, MGM = 34%. Gaming is the entire thesis.
-       Realty Income: Gaming is one diversification segment among many
-       (retail, industrial, gaming, data centers, credit). Not a core concentration.
-
-Q24: What is the 2026 FFO outlook for each REIT in the corpus?
-     Predicted: PARTIAL-PASS (prompt forbids hallucination)
-     Correct answer: The system must distinguish what is and is not disclosed.
-       BXP: $6.96/share midpoint 2026 FFO guidance.
-       PSA standalone: Revenue -2.2% to 0.0%, NOI -3.9% to -0.5%.
-       PSA merger impact: FFO-neutral 2026, $0.10-0.20 accretive 2027.
-       VICI, Digital Realty, Realty Income, EastGroup, Simon:
-       2026 FFO/share guidance is NOT disclosed in their submitted documents.
-       The system must say "not found in sources" — not guess from training data.
-
---------------------------------------------------------------------------------
-SECTION 4 — PREDICTED SCORE SUMMARY
---------------------------------------------------------------------------------
-
-Pass (system gets it right):           ~4-5 questions
-Partial (correct but incomplete):      ~11-12 questions
-Fail (wrong or silent on key detail):  ~7-8 questions
-
-Strongest areas:
-  - Multi-document version attribution (Q3, Q12, Q21, Q24)
-  - Cross-page body-text synthesis (Q16, Q17, Q19)
-  - Content-density filtering for sparse pages (Q20)
-
-Biggest gaps:
-  - Vision/OCR for charts, logos, maps (Q15, Q16 partial, Q18)
-  - Cross-company retrieval diversification (Q22)
-  - Staleness detection from document content (Q4)
-  - Footnote-contradicts-headline detection (Q7, Q8)
-  - document_type not in prompt (Q2, Q11)
-
---------------------------------------------------------------------------------
-SECTION 5 — WHAT TO SAY IN THE DEMO FOR THE GAPS
---------------------------------------------------------------------------------
-
-For vision questions (Q15, Q16, Q18):
-  "The information is in a bar chart / logo image / geographic map that text
-   extraction cannot read. The fix I would build next is passing each page as
-   an image to Claude claude-sonnet-4-6 vision during ingestion and storing the
-   vision-extracted content alongside the PDF text. This is the single highest-
-   impact upgrade for investment document RAG."
-
-For staleness (Q4):
-  "The system retrieves the Simon content correctly but does not yet flag that
-   this is a 2018 document with 2017 data. The fix is to extract the publication
-   date from document content during ingestion, not just the filename, and add
-   a staleness warning in the prompt when the source is more than 2 years old."
-
-For cross-company dominance (Q22):
-  "Without per-document quotas, Digital Realty's 100+ AI mentions push all other
-   companies out of the top results. The fix is Maximal Marginal Relevance or
-   a simple per-document cap enforced before reranking."
-
-For footnote-contradicts-headline (Q7, Q8):
-  "The footnote text is preserved in the chunk. The system knows the information
-   is there. But it has no structured way to know that footnote 2 overrides the
-   chart headline. This requires a parsing layer that tags footnotes separately
-   and gives them elevated authority in the prompt."
+Q17 VICI Las Vegas assets (2 assets still in map graphic only):
+    Vision extraction reads what it can from the map. 8 of 10 assets are named
+    in body text. 2 may remain unreadable if the map labels are too small.
+    Say: "We extract 8 of 10 from text and attempt all 10 via vision. For the
+    remaining assets, higher DPI rendering or a zoom-and-crop pass would help."
 
 ================================================================================
 END OF CHECKLIST
