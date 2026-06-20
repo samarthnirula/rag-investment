@@ -1,5 +1,8 @@
 venv/
 .env
+.env.local
+frontend/.env.local
+frontend/.env*.local
 __pycache__/
 *.pyc
 *.egg-info/
@@ -12,3 +15,11 @@ data/processed/*
 .pytest_cache/
 build/
 dist/
+error.log
+error.log.*
+firebase-service-account.json
+nginx/certs/
+
+# Local AI-assistant tool state — machine-specific, not part of the app
+.claude/
+.agents/

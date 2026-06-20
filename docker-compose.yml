@@ -1,0 +1,147 @@
+services:
+  # ── Redis — broker + result backend for Celery, rate-limiter store ───────────
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly yes
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI backend ──────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      uvicorn backend.main:app
+      --host 0.0.0.0 --port 8000 --workers 2
+    ports:
+      # Bind to loopback only — nginx is the sole external entry point.
+      # NOTE: this used to be pinned to --workers 1 with a comment saying
+      # "add Redis-backed rate limiting before scaling" — that limiter
+      # (backend/rate_limiter.py, Redis sliding window with fail-open
+      # fallback) already exists and is what /api/demo/query enforces, so
+      # it's safe to run >1 worker. Bumped to 2 for a public demo link;
+      # raise further if you see request queuing under load (check nginx
+      # access logs / response times), since each worker holds its own
+      # copy of the embedding model in memory — size the box accordingly.
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    environment:
+      - FIREBASE_SERVICE_ACCOUNT_PATH=/app/firebase-service-account.json
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── Celery worker — processes ingest_pdf jobs from the Redis queue ────────────
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      celery -A insightlens.jobs.celery_app worker
+      --loglevel=info --concurrency=4 --queues=ingest
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    environment:
+      - FIREBASE_SERVICE_ACCOUNT_PATH=/app/firebase-service-account.json
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Next.js frontend ─────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    command: next start -p 3000
+    ports:
+      # Bind to loopback only — nginx is the sole external entry point.
+      - "127.0.0.1:3000:3000"
+    env_file:
+      - .env
+    environment:
+      # Internal API URL used by server-side Next.js routes
+      - NEXT_PUBLIC_API_URL=http://backend:8000
+      # Firebase client keys — sourced from .env file above
+      - NEXT_PUBLIC_FIREBASE_API_KEY=${FIREBASE_API_KEY}
+      - NEXT_PUBLIC_FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
+      - NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=${FIREBASE_PROJECT_ID}.firebaseapp.com
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── nginx reverse proxy ───────────────────────────────────────────────────────
+  # Handles TLS, security headers, HTTP→HTTPS redirect.
+  # Requires TLS certs at nginx/certs/fullchain.pem and nginx/certs/privkey.pem.
+  # For a quick self-signed cert (local dev only):
+  #   openssl req -x509 -newkey rsa:4096 -keyout nginx/certs/privkey.pem \
+  #     -out nginx/certs/fullchain.pem -days 365 -nodes -subj "/CN=localhost"
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Stripe webhook receiver (legacy — kept for billing integration) ────────────
+  # Set STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET in .env.
+  # Point Stripe Dashboard webhook to https://yourdomain.com/webhook/stripe
+  webhook:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      uvicorn insightlens.webhook.stripe_handler:app
+      --host 0.0.0.0 --port 8502 --workers 1
+    ports:
+      - "127.0.0.1:8502:8502"
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8502/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  redis_data:

@@ -12,6 +12,7 @@ from sentence_transformers import CrossEncoder
 from insightlens.storage.chunk_repository import RetrievedChunk
 
 _DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+_RERANK_THRESHOLD = 0.3  # chunks scoring below this are dropped as irrelevant
 
 
 class Reranker:
@@ -20,10 +21,16 @@ class Reranker:
     def __init__(self, model: str = _DEFAULT_MODEL) -> None:
         self._model = CrossEncoder(model)
 
-    def rerank(self, query: str, chunks: list[RetrievedChunk], top_k: int) -> list[RetrievedChunk]:
+    def rerank(
+        self,
+        query: str,
+        chunks: list[RetrievedChunk],
+        top_k: int,
+        threshold: float = _RERANK_THRESHOLD,
+    ) -> list[RetrievedChunk]:
         if not chunks:
             return []
         pairs = [(query, chunk.chunk_text) for chunk in chunks]
         scores = self._model.predict(pairs).tolist()
         ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
-        return [chunk for _, chunk in ranked[:top_k]]
+        return [chunk for score, chunk in ranked[:top_k] if score >= threshold]

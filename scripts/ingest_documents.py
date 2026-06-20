@@ -7,10 +7,16 @@ from collections import defaultdict
 from datetime import date
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
+
+from dotenv import load_dotenv
+load_dotenv()
+
 from insightlens.config import RAW_PDF_DIR, ConfigError, load_config
 from insightlens.embeddings.embedder import EmbeddingError, Embedder
 from insightlens.ingestion.chunker import ChunkingError, SlideAwareChunker
 from insightlens.ingestion.document_metadata import extract_metadata
+from insightlens.ingestion.image_extractor import extract_images_from_pdf
 from insightlens.ingestion.pdf_parser import PDFParsingError, parse_pdf
 from insightlens.storage.chunk_repository import (
     ChunkRecord,
@@ -18,10 +24,13 @@ from insightlens.storage.chunk_repository import (
     DocumentRecord,
     RepositoryError,
 )
+from insightlens.storage.image_repository import ImageRecord, ImageRepository
 from insightlens.storage.snowflake_client import (
     SnowflakeConnectionError,
     open_connection,
 )
+
+IMAGES_DIR = RAW_PDF_DIR.parent / "images"
 
 
 def _document_id(path: Path) -> str:
@@ -37,6 +46,8 @@ def _process_pdf(
     chunker: SlideAwareChunker,
     embedder: Embedder,
     repository: ChunkRepository,
+    image_repo: ImageRepository,
+    api_key: str = "",
 ) -> int:
     print(f"[ingest] Parsing {path.name}")
     parsed = parse_pdf(path)
@@ -86,6 +97,15 @@ def _process_pdf(
 
     inserted = repository.insert_chunks(records)
     print(f"[ingest] Inserted {inserted} chunks for {path.name}")
+
+    # Extract and store embedded images
+    img_out = IMAGES_DIR / document_id
+    img_records = extract_images_from_pdf(path, document_id, img_out, api_key=api_key)
+    if img_records:
+        for r in img_records:
+            image_repo.insert_image(ImageRecord(**r))
+        print(f"[ingest] Stored {len(img_records)} image(s) for {path.name}")
+
     return inserted
 
 
@@ -115,9 +135,9 @@ def main() -> int:
         print(f"[ingest] Configuration error: {exc}", file=sys.stderr)
         return 1
 
-    pdf_paths = sorted(RAW_PDF_DIR.glob("*.pdf"))
+    pdf_paths = sorted(RAW_PDF_DIR.rglob("*.pdf"))
     if not pdf_paths:
-        print(f"[ingest] No PDFs found in {RAW_PDF_DIR}", file=sys.stderr)
+        print(f"[ingest] No PDFs found under {RAW_PDF_DIR}", file=sys.stderr)
         return 1
 
     chunker = SlideAwareChunker(
@@ -130,11 +150,15 @@ def main() -> int:
 
     total_inserted = 0
     try:
-        with open_connection(cfg.snowflake) as conn:
-            repository = ChunkRepository(conn)
+        with open_connection(cfg.db) as conn:
+            repository  = ChunkRepository(conn)
+            image_repo  = ImageRepository(conn)
             for path in pdf_paths:
                 try:
-                    total_inserted += _process_pdf(path, chunker, embedder, repository)
+                    total_inserted += _process_pdf(
+                        path, chunker, embedder, repository, image_repo,
+                        api_key=cfg.anthropic_api_key,
+                    )
                 except PDFParsingError as exc:
                     print(f"[ingest] Skipping {path.name}: {exc}", file=sys.stderr)
                 except ChunkingError as exc:

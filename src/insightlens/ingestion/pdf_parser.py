@@ -8,6 +8,7 @@ from pathlib import Path
 import fitz
 import pdfplumber
 
+from insightlens.ingestion.ocr_extractor import extract_text_with_ocr
 from insightlens.ingestion.vision_extractor import extract_visual_content
 
 # Pages with fewer than this many characters are treated as visual-dominant
@@ -137,6 +138,15 @@ def parse_pdf(path: Path) -> ParsedDocument:
                 if len(stripped) < _VISION_CALL_THRESHOLD:
                     vision_text = extract_visual_content(page) or None
 
+                # OCR fallback: for truly blank text layers (scanned PDFs) where
+                # neither native text extraction nor vision produced anything useful,
+                # run Tesseract OCR directly on the rendered page image.
+                # Only activates when pytesseract + tesseract binary are installed.
+                if len(stripped) < 50 and not vision_text:
+                    ocr_result = extract_text_with_ocr(page)
+                    if ocr_result:
+                        stripped = _tag_footnotes(ocr_result)
+
                 pages.append(
                     ParsedPage(
                         page_number=index + 1,
@@ -154,7 +164,8 @@ def parse_pdf(path: Path) -> ParsedDocument:
     if not any(page.text for page in pages):
         raise PDFParsingError(
             f"No extractable text found in {path.name}. "
-            f"This may be a scanned PDF requiring OCR."
+            f"This appears to be a fully scanned PDF. "
+            f"Install pytesseract + Tesseract (brew install tesseract) to enable OCR."
         )
 
     return ParsedDocument(file_path=path, pages=pages)

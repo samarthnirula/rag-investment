@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=9.0.3          # CVE-2025-71176 fixed in 9.0.3
+pip-audit>=2.7.0
+pre-commit>=3.7.0

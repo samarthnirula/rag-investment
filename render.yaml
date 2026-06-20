@@ -1,0 +1,56 @@
+# Render Blueprint for the Atticus backend.
+# Usage: in the Render dashboard, "New +" -> "Blueprint" -> connect this repo.
+# Render will read this file, create the service below, and prompt you to
+# fill in every env var marked `sync: false` (it leaves them blank on purpose —
+# nothing secret lives in this file or in git).
+#
+# This deploys ONLY the FastAPI backend (Dockerfile at repo root). The
+# frontend goes to Vercel separately; Postgres/auth come from Supabase/Firebase.
+services:
+  - type: web
+    name: atticus-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      # ── Required — app will fail to start without these ──────────────────
+      - key: DATABASE_URL
+        sync: false   # Supabase connection string (use the pooled URI)
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: EMBEDDING_MODEL
+        sync: false   # e.g. voyage-law-2 (if VOYAGE_API_KEY set) or all-MiniLM-L6-v2
+      - key: GENERATION_MODEL
+        sync: false   # e.g. claude-sonnet-4-6
+      - key: RETRIEVAL_TOP_K
+        value: "8"
+      - key: ADMIN_API_KEY
+        sync: false   # generate with `python scripts/generate_secrets.py`
+      - key: APP_URL
+        sync: false   # your real frontend origin, e.g. https://atticus.law — CORS depends on this
+      # ── Voyage embeddings — set this to skip loading sentence-transformers/torch ──
+      - key: VOYAGE_API_KEY
+        sync: false
+      # ── Firebase Admin SDK — paste the whole downloaded service-account JSON here ──
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: FIREBASE_API_KEY
+        sync: false
+      # ── Demo portal access codes — hand these to testers ──────────────────
+      - key: DEMO_ACCESS_CODE_USER1
+        sync: false
+      - key: DEMO_ACCESS_CODE_USER2
+        sync: false
+      - key: DEMO_ACCESS_CODE_USER3
+        sync: false
+      # ── Optional, safe to leave unset for v1 (falls back to in-memory) ────
+      - key: REDIS_URL
+        sync: false
+      - key: ZEP_ENABLED
+        value: "false"
+      - key: CHUNK_SIZE_TOKENS
+        value: "400"
+      - key: CHUNK_OVERLAP_TOKENS
+        value: "50"

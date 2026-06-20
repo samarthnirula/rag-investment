@@ -104,7 +104,7 @@ def main() -> None:
     reranker = Reranker()
 
     print("Loading corpus for BM25…", flush=True)
-    with open_connection(cfg.snowflake) as conn:
+    with open_connection(cfg.db) as conn:
         repo = ChunkRepository(conn)
         corpus = repo.get_all_chunks()
         companies = repo.list_companies()
@@ -116,7 +116,7 @@ def main() -> None:
     reciprocal_ranks: list[float] = []
 
     for i, (query, signals, company_filter) in enumerate(TEST_CASES, start=1):
-        with open_connection(cfg.snowflake) as conn:
+        with open_connection(cfg.db) as conn:
             repo = ChunkRepository(conn)
             service = HybridSearchService(
                 embedder=embedder,

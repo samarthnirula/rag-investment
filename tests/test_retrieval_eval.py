@@ -53,7 +53,7 @@ def retrieval_stack():
     embedder = Embedder(model=cfg.embedding_model)
     reranker = Reranker()
 
-    with open_connection(cfg.snowflake) as conn:
+    with open_connection(cfg.db) as conn:
         repo = ChunkRepository(conn)
         corpus = repo.get_all_chunks()
 
@@ -90,7 +90,7 @@ def test_retrieval_quality(retrieval_stack):
 
     results: list[dict] = []
 
-    with open_connection(cfg.snowflake) as conn:
+    with open_connection(cfg.db) as conn:
         repo = ChunkRepository(conn)
         service = HybridSearchService(
             embedder=embedder,

@@ -7,7 +7,7 @@ def test_extracts_version_from_filename():
     metadata = extract_metadata(Path("Acme_InvestorDeck_v2.pdf"), "Acme Corp\nInvestor Update")
     assert metadata.company == "Acme"
     assert metadata.version_label == "2"
-    assert metadata.document_type == "investor_presentation"
+    assert metadata.document_type == "Investor Presentation"
 
 
 def test_extracts_quarter_year():

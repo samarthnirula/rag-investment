@@ -1,12 +1,61 @@
+# ── Core AI / ML ───────────────────────────────────────────────────────────────
 anthropic==0.100.0
+zep-cloud>=3.0.0
 sentence-transformers==3.3.1
-snowflake-connector-python==3.12.3
-pyOpenSSL>=24.0.0
-cryptography>=42.0.0
+voyageai>=0.3.0
+# transformers: CVE-2026-1839 fix is in 5.0.0rc3 (RC — not production-safe).
+# Risk is LOW: we only load one pinned model from HuggingFace, never user-supplied.
+# Upgrade to stable 5.x when released.
+transformers>=4.51.0
+
+# ── PostgreSQL + pgvector ──────────────────────────────────────────────────────
+psycopg2-binary>=2.9.9
+
+# ── PDF / Document parsing ─────────────────────────────────────────────────────
 PyMuPDF==1.24.13
-pdfplumber==0.11.4
+pdfplumber==0.11.9
+pdfminer.six==20251230               # CVE-2025-64512/70559 patched
+
+# ── Data / Embeddings ──────────────────────────────────────────────────────────
 tiktoken==0.8.0
-python-dotenv==1.0.1
-streamlit==1.40.1
-pydantic==2.9.2
 rank-bm25==0.2.2
+huggingface_hub>=0.23.0
+gdown>=5.1.0
+
+# ── Web / Scraping ─────────────────────────────────────────────────────────────
+playwright>=1.44.0
+requests>=2.32.0
+
+# ── Image processing ──────────────────────────────────────────────────────────
+Pillow==12.2.0                       # CVE-2026-25990/40192/42309/42310/42311 patched
+pytesseract>=0.3.13                  # OCR fallback for scanned PDFs (requires system tesseract)
+
+# ── Auth ───────────────────────────────────────────────────────────────────────
+firebase-admin==7.4.0
+pyjwt[crypto]==2.13.0                # PYSEC-2026-175/177/178/179 patched
+bcrypt>=4.0.0
+cryptography>=42.0.0                 # explicit pin: used directly by storage/token_crypto.py
+                                      # (previously only a transitive dep of pyjwt[crypto])
+
+# ── UI ─────────────────────────────────────────────────────────────────────────
+streamlit==1.58.0                    # CVE-2026-33682 patched
+
+# ── Cloud Storage Integration ─────────────────────────────────────────────────
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.2.0
+dropbox>=11.0.0
+msgraph-sdk>=1.8.0
+azure-identity>=1.16.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+stripe>=10.0.0
+
+# ── Config / Utils ─────────────────────────────────────────────────────────────
+python-dotenv==1.2.2                 # CVE-2026-28684 patched
+pydantic==2.9.2
+idna>=3.15                           # CVE-2026-45409 patched
+
+# ── Task queue (Celery + Redis) ────────────────────────────────────────────────
+celery[redis]>=5.3.0
+redis>=5.0.0
+kombu>=5.3.0

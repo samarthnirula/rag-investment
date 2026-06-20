@@ -1,4 +1,4 @@
-"""Creates Snowflake database, schema, and tables defined in schema.sql."""
+"""Creates/updates the PostgreSQL database schema and applies migrations."""
 from __future__ import annotations
 
 import sys
@@ -10,6 +10,7 @@ from insightlens.storage.snowflake_client import (
     execute_script,
     open_connection,
 )
+from insightlens.storage.migrations import apply_migrations
 
 
 def main() -> int:
@@ -27,13 +28,20 @@ def main() -> int:
     sql_text = schema_path.read_text()
 
     try:
-        with open_connection(cfg.snowflake) as conn:
+        with open_connection(cfg.db) as conn:
             execute_script(conn, sql_text)
+            migrations = apply_migrations(conn)
     except SnowflakeConnectionError as exc:
         print(f"[setup_database] {exc}", file=sys.stderr)
         return 1
 
     print("[setup_database] Schema applied successfully.")
+    applied = [m for m in migrations if m.applied]
+    skipped = [m for m in migrations if not m.applied]
+    if applied:
+        print("[setup_database] Applied migrations: " + ", ".join(m.version for m in applied))
+    if skipped:
+        print("[setup_database] Already applied: " + ", ".join(m.version for m in skipped))
     return 0
 
 

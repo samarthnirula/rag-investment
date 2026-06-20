@@ -20,6 +20,11 @@ class RetrievalRequest:
     query: str
     top_k: int
     company_filter: str | None = None
+    user_id: str | None = None
+    org_member_ids: list[str] | None = None
+    system_only: bool = False
+    user_only: bool = False
+    case_id: str | None = None
     # Optional explicit type preference — overrides auto-detection.
     # e.g. ("financial_table",) to restrict scoring boost to table chunks only.
     preferred_chunk_types: tuple[str, ...] | None = None
@@ -53,6 +58,11 @@ class VectorSearchService:
             query_embedding=query_vector,
             top_k=candidate_k,
             company_filter=request.company_filter,
+            user_id=request.user_id,
+            org_member_ids=request.org_member_ids,
+            system_only=request.system_only,
+            user_only=request.user_only,
+            case_id=request.case_id,
         )
 
         if self._reranker and chunks:

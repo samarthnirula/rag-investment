@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "insightlens"
 version = "0.1.0"
-description = "Version-aware RAG over investment documents"
+description = "Legal document intelligence workspace with source-grounded RAG"
 requires-python = ">=3.10"
 
 [tool.setuptools.packages.find]
@@ -14,3 +14,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.bandit]
+exclude_dirs = ["venv", "tests", "scripts", "data"]
+skips = ["B101"]   # allow assert statements

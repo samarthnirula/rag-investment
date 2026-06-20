@@ -24,6 +24,45 @@ import re
 
 from rank_bm25 import BM25Okapi
 
+# ── BM25 preprocessing ────────────────────────────────────────────────────────
+_STOPWORDS: frozenset[str] = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "and", "or", "but", "if",
+    "in", "on", "at", "to", "for", "of", "with", "by", "from", "up",
+    "about", "than", "as", "it", "its", "he", "she", "they", "we", "you",
+    "i", "me", "my", "our", "your", "his", "her", "their", "this", "that",
+    "these", "those", "what", "which", "who", "where", "when", "how", "why",
+    "not", "no", "so", "out", "into", "over", "after", "then", "there",
+    "just", "also", "any", "all", "each", "few", "more", "most", "other",
+    "some", "such", "only", "own", "same", "too", "very", "get", "got",
+    "per", "its", "use", "used", "using", "make", "made", "given", "show",
+})
+
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercase, split on whitespace, remove stopwords and tokens under 3 chars."""
+    return [t for t in text.lower().split() if len(t) >= 3 and t not in _STOPWORDS]
+
+
+# ── Compound query splitting ───────────────────────────────────────────────────
+_MULTI_Q_RE = re.compile(r"\?\s+")
+
+
+def _split_compound_query(query: str) -> list[str]:
+    """Split a compound multi-question query at '?' boundaries.
+
+    Only treats the input as compound if every resulting part has at least
+    3 words; single questions that happen to contain a '?' mid-sentence are
+    left intact.
+    """
+    parts = _MULTI_Q_RE.split(query.strip())
+    clean = [p.strip() for p in parts if len(p.strip().split()) >= 3]
+    if len(clean) <= 1:
+        return [query]
+    return [p if p.endswith("?") else p + "?" for p in clean]
+
+
 from insightlens.embeddings.embedder import Embedder
 from insightlens.retrieval.reranker import Reranker
 from insightlens.retrieval.vector_search import RetrievalRequest
@@ -71,6 +110,44 @@ _NUMERIC_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
+_QUERY_EXPANSIONS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"\b(?:brief|summarize|summary|overview|what(?:'s| is) this case about)\b", re.IGNORECASE),
+        "case summary facts parties claims charges allegations evidence procedural posture key issues",
+    ),
+    (
+        re.compile(r"\b(?:suspect|perpetrator|who did it|person of interest)\b", re.IGNORECASE),
+        "suspect defendant accused charged arrested person of interest responsible",
+    ),
+    (
+        re.compile(r"\b(?:victim|decedent|injured|survivor)\b", re.IGNORECASE),
+        "victim decedent injured killed survivor complainant",
+    ),
+    (
+        re.compile(r"\b(?:image|images|photo|photos|visual|picture|diagram|map)\b", re.IGNORECASE),
+        "image photo visual evidence portrait diagram map AI vision extraction caption",
+    ),
+    (
+        re.compile(r"\b(?:timeline|chronology|when|dates?)\b", re.IGNORECASE),
+        "timeline chronology date time incident event report",
+    ),
+    (
+        re.compile(r"\b(?:evidence|proof|exhibits?|support)\b", re.IGNORECASE),
+        "evidence exhibit report witness statement photo record document",
+    ),
+]
+
+
+def _expand_query(query: str) -> str:
+    additions = [
+        expansion
+        for pattern, expansion in _QUERY_EXPANSIONS
+        if pattern.search(query)
+    ]
+    if not additions:
+        return query
+    return f"{query} {' '.join(additions)}"
+
 
 class HybridSearchService:
     """BM25 + vector search fused with RRF, version-scored, then cross-encoder reranked."""
@@ -88,25 +165,66 @@ class HybridSearchService:
 
         # Build BM25 index once from the preloaded corpus.
         self._corpus = corpus_chunks
-        tokenized = [c.chunk_text.lower().split() for c in corpus_chunks]
+        tokenized = [_tokenize(c.chunk_text) for c in corpus_chunks]
         self._bm25 = BM25Okapi(tokenized) if tokenized else None
 
     def retrieve(self, request: RetrievalRequest) -> list[RetrievedChunk]:
+        # ── Query quality guard ───────────────────────────────────────────────
+        meaningful = _tokenize(request.query)
+        if len(meaningful) < 2:
+            raise ValueError(
+                "Query is too short or contains only common words. "
+                "Please ask a more specific question."
+            )
+
+        # ── Compound query: split, retrieve per sub-question, merge ──────────
+        sub_queries = _split_compound_query(request.query)
+        if len(sub_queries) > 1:
+            seen: set[str] = set()
+            merged: list[RetrievedChunk] = []
+            for sub_q in sub_queries:
+                sub_req = RetrievalRequest(
+                    query=sub_q,
+                    top_k=request.top_k,
+                    company_filter=request.company_filter,
+                    user_id=request.user_id,
+                    org_member_ids=request.org_member_ids,
+                    system_only=request.system_only,
+                    user_only=request.user_only,
+                    case_id=request.case_id,
+                    preferred_chunk_types=request.preferred_chunk_types,
+                )
+                for chunk in self._retrieve_single(sub_req):
+                    if chunk.chunk_id not in seen:
+                        seen.add(chunk.chunk_id)
+                        merged.append(chunk)
+            return merged[: request.top_k]
+
+        return self._retrieve_single(request)
+
+    def _retrieve_single(self, request: RetrievalRequest) -> list[RetrievedChunk]:
+        """Core 8-stage retrieval pipeline for a single query."""
         candidate_k = request.top_k * _CANDIDATE_MULTIPLIER
+        expanded_query = _expand_query(request.query)
 
         # ── 1. Vector search ──────────────────────────────────────────────────
-        query_vector = self._embedder.embed_query(request.query)
+        query_vector = self._embedder.embed_query(expanded_query)
         vector_candidates = self._repository.search_similar(
             query_embedding=query_vector,
             top_k=candidate_k,
             company_filter=request.company_filter,
+            user_id=request.user_id,
+            org_member_ids=request.org_member_ids,
+            system_only=request.system_only,
+            user_only=request.user_only,
+            case_id=request.case_id,
         )
         vector_candidates = [
             c for c in vector_candidates if c.similarity >= _SIMILARITY_THRESHOLD
         ]
 
         # ── 2. BM25 search ────────────────────────────────────────────────────
-        bm25_candidates = self._bm25_search(request.query, request.company_filter, candidate_k)
+        bm25_candidates = self._bm25_search(expanded_query, request.company_filter, candidate_k)
 
         # ── 3. RRF fusion ─────────────────────────────────────────────────────
         fused_scored = self._rrf_fuse(vector_candidates, bm25_candidates)
@@ -143,7 +261,7 @@ class HybridSearchService:
     ) -> list[RetrievedChunk]:
         if self._bm25 is None:
             return []
-        scores = self._bm25.get_scores(query.lower().split())
+        scores = self._bm25.get_scores(_tokenize(query))
         ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
         results: list[RetrievedChunk] = []
         for idx, score in ranked:

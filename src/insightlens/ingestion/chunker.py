@@ -1,4 +1,4 @@
-"""Token-aware chunking with slide-deck awareness for investment documents."""
+"""Token-aware chunking with document-page awareness."""
 from __future__ import annotations
 
 import json
@@ -27,6 +27,23 @@ class TextChunk:
 _SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
 
 
+class _WhitespaceEncoder:
+    """Offline fallback when tiktoken's encoding file is not cached locally."""
+
+    def encode(self, text: str) -> list[str]:
+        return text.split()
+
+    def decode(self, tokens: list[str]) -> str:
+        return " ".join(tokens)
+
+
+def _load_encoder(encoding_name: str):
+    try:
+        return tiktoken.get_encoding(encoding_name)
+    except Exception:
+        return _WhitespaceEncoder()
+
+
 class RecursiveTokenChunker:
     """Splits text into chunks bounded by token count, preferring natural boundaries."""
 
@@ -40,7 +57,7 @@ class RecursiveTokenChunker:
 
         self._chunk_size = chunk_size_tokens
         self._overlap = overlap_tokens
-        self._encoder = tiktoken.get_encoding(encoding_name)
+        self._encoder = _load_encoder(encoding_name)
 
     def chunk_page(self, text: str, page_number: int, starting_chunk_index: int) -> list[TextChunk]:
         if not text.strip():
@@ -116,10 +133,10 @@ class RecursiveTokenChunker:
 
 
 class SlideAwareChunker:
-    """Keeps each slide page as a coherent chunk unit instead of cutting at fixed token counts.
+    """Keeps each page as a coherent chunk unit instead of cutting blindly.
 
-    Investment decks are slide-based: each page is one self-contained idea. Splitting
-    across slide boundaries produces half-thoughts. This chunker:
+    Page-based legal and public-record files often have coherent page-level
+    context. Splitting across page boundaries can produce half-thoughts. This chunker:
       1. Merges tiny title-only pages (<30 tokens) into the following content page.
       2. Tags every chunk with the slide title as section_header.
       3. Creates a separate financial_table chunk for each extracted table, preserving
@@ -130,12 +147,12 @@ class SlideAwareChunker:
 
     def __init__(
         self,
-        chunk_size_tokens: int,
-        overlap_tokens: int,
+        chunk_size_tokens: int = 400,
+        overlap_tokens: int = 50,
         encoding_name: str = "cl100k_base",
     ) -> None:
         self._inner = RecursiveTokenChunker(chunk_size_tokens, overlap_tokens, encoding_name)
-        self._encoder = tiktoken.get_encoding(encoding_name)
+        self._encoder = _load_encoder(encoding_name)
 
     def chunk_document(self, pages: list[ParsedPage]) -> list[TextChunk]:
         merged = self._merge_title_pages(pages)
