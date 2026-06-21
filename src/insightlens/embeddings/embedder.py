@@ -68,30 +68,25 @@ class Embedder:
                     f"Failed to initialise Voyage AI client: {exc}"
                 ) from exc
         else:
-            try:
-                # Local SentenceTransformer pulls in joblib's "loky" multiprocessing
-                # backend, which spawns background worker processes. Under uvicorn
-                # --reload, each file-save restart kills the process before those
-                # workers shut down cleanly, producing a harmless but noisy
-                # "leaked semaphore objects" warning on exit. Capping loky to a
-                # single process avoids spawning the pool at all — no behavior
-                # change for embedding correctness, just removes the dev-only noise.
-                os.environ.setdefault("LOKY_MAX_CPU_COUNT", "1")
-                from sentence_transformers import SentenceTransformer
-                self._st_model = SentenceTransformer(model)
-                self._backend = "local"
-                self._local_model_name = model
-                self._dim = LOCAL_DIM
-                self._batch_size = batch_size
-                logger.info(
-                    "Embedder: using local SentenceTransformer (model=%s, dim=%d)",
-                    model,
-                    LOCAL_DIM,
-                )
-            except Exception as exc:
-                raise EmbeddingError(
-                    f"Failed to load embedding model '{model}': {exc}"
-                ) from exc
+            # Defer the actual SentenceTransformer/torch import+load until the
+            # first embed call instead of doing it here in __init__. __init__
+            # runs during app startup, before uvicorn binds its port — on
+            # memory-constrained hosts (e.g. Render free tier), loading torch
+            # eagerly at boot was racing the platform's port-scan timeout and
+            # causing an OOM kill before the server ever came up, even on
+            # deploys that never end up using local embeddings. No behavior
+            # change for embedding correctness, just moves *when* the load
+            # happens.
+            self._st_model = None
+            self._backend = "local"
+            self._local_model_name = model
+            self._dim = LOCAL_DIM
+            self._batch_size = batch_size
+            logger.info(
+                "Embedder: using local SentenceTransformer (model=%s, dim=%d, lazy-loaded)",
+                model,
+                LOCAL_DIM,
+            )
 
     @property
     def vector_dim(self) -> int:
@@ -145,6 +140,11 @@ class Embedder:
 
     def _embed_local(self, batch: list[str]) -> list[EmbeddingResult]:
         try:
+            if self._st_model is None:
+                # See __init__: load is deferred to here, on first actual use.
+                os.environ.setdefault("LOKY_MAX_CPU_COUNT", "1")
+                from sentence_transformers import SentenceTransformer
+                self._st_model = SentenceTransformer(self._local_model_name)
             vectors = self._st_model.encode(batch, convert_to_numpy=True)
         except Exception as exc:
             raise EmbeddingError(
