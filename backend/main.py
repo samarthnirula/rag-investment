@@ -1134,10 +1134,17 @@ def create_app() -> FastAPI:
         "http://127.0.0.1:3000",
         "http://127.0.0.1:3001",
         "http://localhost:8501",
+        # Canonical production frontend. Keep this in code as a safe default:
+        # an unset/stale Render APP_URL must not make the deployed Vercel app
+        # fail every browser preflight while the backend itself appears healthy.
+        "https://rag-investment.vercel.app",
         *configured_origins,
     ]
     cors_origins = list(dict.fromkeys(o.rstrip("/") for o in _raw_origins if o))
-    cors_origin_regex = os.getenv("CORS_ORIGIN_REGEX", "").strip() or None
+    cors_origin_regex = (
+        os.getenv("CORS_ORIGIN_REGEX", "").strip()
+        or r"^https://rag-investment(?:-[a-z0-9-]+)*\.vercel\.app$"
+    )
 
     app.add_middleware(
         CORSMiddleware,

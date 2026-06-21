@@ -7,7 +7,12 @@ const DEFAULT_BASE =
   process.env.NODE_ENV === "production"
     ? "https://atticus-backend.onrender.com"
     : "http://localhost:8000";
-const BASE = (process.env.NEXT_PUBLIC_API_URL || DEFAULT_BASE).replace(/\/+$/, "");
+const CONFIGURED_BASE = process.env.NEXT_PUBLIC_API_URL?.trim() || "";
+const BASE = (
+  process.env.NODE_ENV === "production" && /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(CONFIGURED_BASE)
+    ? DEFAULT_BASE
+    : CONFIGURED_BASE || DEFAULT_BASE
+).replace(/\/+$/, "");
 const TOKEN_KEY = "demo_token";
 const REQUEST_TIMEOUT_MS = 20000;
 
