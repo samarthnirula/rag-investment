@@ -14,7 +14,7 @@ const BASE = (
     : CONFIGURED_BASE || DEFAULT_BASE
 ).replace(/\/+$/, "");
 const TOKEN_KEY = "demo_token";
-const REQUEST_TIMEOUT_MS = 20000;
+const REQUEST_TIMEOUT_MS = 120000;
 
 async function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const controller = new AbortController();
