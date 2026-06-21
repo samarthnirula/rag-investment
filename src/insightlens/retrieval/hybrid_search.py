@@ -66,7 +66,7 @@ def _split_compound_query(query: str) -> list[str]:
 from insightlens.embeddings.embedder import Embedder
 from insightlens.retrieval.reranker import Reranker
 from insightlens.retrieval.vector_search import RetrievalRequest
-from insightlens.storage.chunk_repository import ChunkRepository, RetrievedChunk
+from insightlens.storage.chunk_repository import ChunkRepository, RepositoryError, RetrievedChunk
 
 _RRF_K = 60                   # dampens rank differences; 60 is the standard choice
 _SIMILARITY_THRESHOLD = 0.35  # cosine floor — vector candidates below this are dropped
@@ -209,16 +209,22 @@ class HybridSearchService:
 
         # ── 1. Vector search ──────────────────────────────────────────────────
         query_vector = self._embedder.embed_query(expanded_query)
-        vector_candidates = self._repository.search_similar(
-            query_embedding=query_vector,
-            top_k=candidate_k,
-            company_filter=request.company_filter,
-            user_id=request.user_id,
-            org_member_ids=request.org_member_ids,
-            system_only=request.system_only,
-            user_only=request.user_only,
-            case_id=request.case_id,
-        )
+        try:
+            vector_candidates = self._repository.search_similar(
+                query_embedding=query_vector,
+                top_k=candidate_k,
+                company_filter=request.company_filter,
+                user_id=request.user_id,
+                org_member_ids=request.org_member_ids,
+                system_only=request.system_only,
+                user_only=request.user_only,
+                case_id=request.case_id,
+            )
+        except RepositoryError:
+            # Preserve BM25 retrieval while stored vectors are being migrated
+            # between dimensions. Vector search is unchanged and resumes
+            # automatically as soon as the configured dimensions match.
+            vector_candidates = []
         vector_candidates = [
             c for c in vector_candidates if c.similarity >= _SIMILARITY_THRESHOLD
         ]

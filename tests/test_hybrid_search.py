@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from insightlens.retrieval.hybrid_search import HybridSearchService, _NUMERIC_QUERY_RE
 from insightlens.retrieval.vector_search import RetrievalRequest
-from insightlens.storage.chunk_repository import RetrievedChunk
+from insightlens.storage.chunk_repository import RepositoryError, RetrievedChunk
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -42,6 +42,11 @@ class _Stub:
 
     def search_similar(self, **_):
         return []
+
+
+class _VectorUnavailableStub(_Stub):
+    def search_similar(self, **_):
+        raise RepositoryError("different vector dimensions 384 and 1024")
 
 
 def _service():
@@ -146,3 +151,28 @@ def test_preferred_chunk_types_override_auto_detection():
     )
     result = dict(svc._apply_chunk_type_scores([(table, 1.0), (body, 1.0)], req))
     assert result[table] > result[body], "Explicit preferred_chunk_types should override auto-detection"
+
+
+def test_bm25_remains_available_when_vector_dimensions_do_not_match():
+    corpus = [
+        _chunk(
+            "c1",
+            "D1",
+            text="The agreement includes a specific termination clause.",
+        ),
+        _chunk("c2", "D2", text="Unrelated background material."),
+        _chunk("c3", "D3", text="Additional procedural history."),
+    ]
+    service = HybridSearchService(
+        _Stub(),
+        _VectorUnavailableStub(),
+        corpus,
+        reranker=None,
+    )
+
+    results = service.retrieve(
+        RetrievalRequest(query="What does the termination clause say?", top_k=2)
+    )
+
+    assert results
+    assert results[0].chunk_id == "c1"

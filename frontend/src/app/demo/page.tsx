@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { demoAuth, setDemoToken, getDemoToken } from "@/lib/demo-api";
+import { demoAuth, demoMe, setDemoToken, getDemoToken, clearDemoToken } from "@/lib/demo-api";
 
 export default function DemoEntryPage() {
   const router = useRouter();
@@ -17,7 +17,10 @@ export default function DemoEntryPage() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (getDemoToken()) router.replace("/demo/chat");
+    if (!getDemoToken()) return;
+    demoMe()
+      .then(() => router.replace("/demo/chat"))
+      .catch(() => clearDemoToken());
   }, [router]);
 
   async function handleSubmit(e: React.FormEvent) {
