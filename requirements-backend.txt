@@ -1,0 +1,39 @@
+# Render/FastAPI runtime dependencies.
+#
+# Deliberately excludes the local ML stack (sentence-transformers,
+# transformers, torch, voyageai). Production uses the lightweight Voyage REST
+# path and disables the local cross-encoder to stay within Render's 512 MiB
+# memory limit. requirements.txt remains the complete local/Streamlit setup.
+
+anthropic==0.100.0
+zep-cloud>=3.0.0
+
+psycopg2-binary>=2.9.9
+
+PyMuPDF==1.24.13
+pdfplumber==0.11.9
+pdfminer.six==20251230
+tiktoken==0.8.0
+rank-bm25==0.2.2
+
+requests>=2.32.0
+Pillow==12.2.0
+pytesseract>=0.3.13
+
+firebase-admin==7.4.0
+pyjwt[crypto]==2.13.0
+bcrypt>=4.0.0
+cryptography>=42.0.0
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+stripe>=10.0.0
+
+python-dotenv==1.2.2
+pydantic==2.9.2
+idna>=3.15
+
+celery[redis]>=5.3.0
+redis>=5.0.0
+kombu>=5.3.0

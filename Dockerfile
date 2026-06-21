@@ -7,9 +7,12 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Install Python dependencies first (layer-cacheable)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install the API-only dependency set. The full development/Streamlit
+# requirements include torch, transformers, and sentence-transformers; those
+# are not needed on Render because production embeddings use Voyage's REST API
+# and they make the 512 MiB service exceed its memory limit at startup.
+COPY requirements-backend.txt .
+RUN pip install --no-cache-dir -r requirements-backend.txt
 
 # Copy source before editable install
 COPY src/ /app/src/

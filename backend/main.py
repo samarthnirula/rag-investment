@@ -7,6 +7,7 @@ import logging.handlers
 import os
 import re
 import tempfile
+import threading
 import uuid as _uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2499,10 +2500,26 @@ def create_app() -> FastAPI:
         from demo_router import router as demo_router, seed_demo_users
     app.include_router(demo_router)
     if _cfg:
-        try:
-            seed_demo_users(_cfg)
-        except Exception as _seed_exc:
-            logger.warning("seed_demo_users failed at startup: %s", _seed_exc, exc_info=True)
+        # Seeding opens the database and may wait on network/DNS. Running it
+        # synchronously inside create_app() prevents uvicorn from binding PORT,
+        # which makes Render report "No open ports detected" and can compound
+        # memory pressure during cold starts. The daemon thread preserves the
+        # idempotent seed while allowing the health endpoint to come up first.
+        def _seed_demo_users_in_background() -> None:
+            try:
+                seed_demo_users(_cfg)
+            except Exception as _seed_exc:
+                logger.warning(
+                    "seed_demo_users failed after startup: %s",
+                    _seed_exc,
+                    exc_info=True,
+                )
+
+        threading.Thread(
+            target=_seed_demo_users_in_background,
+            name="atticus-demo-seed",
+            daemon=True,
+        ).start()
     else:
         # Previously silent: if service bootstrap failed above, _cfg is None
         # and seed_demo_users is never even called — meaning demo access

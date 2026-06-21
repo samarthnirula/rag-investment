@@ -37,6 +37,10 @@ services:
       # ── Voyage embeddings — set this to skip loading sentence-transformers/torch ──
       - key: VOYAGE_API_KEY
         sync: false
+      - key: ATTICUS_LOCAL_RERANKER
+        value: "false"
+      - key: PG_POOL_SIZE
+        value: "2"
       # ── Firebase Admin SDK — paste the whole downloaded service-account JSON here ──
       - key: FIREBASE_SERVICE_ACCOUNT_JSON
         sync: false

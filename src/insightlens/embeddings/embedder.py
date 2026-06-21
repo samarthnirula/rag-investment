@@ -11,6 +11,8 @@ import os
 from dataclasses import dataclass
 from typing import Sequence
 
+import requests
+
 logger = logging.getLogger(__name__)
 
 # voyage-law-2 outputs 1024-dim; all-MiniLM-L6-v2 outputs 384-dim
@@ -19,6 +21,8 @@ LOCAL_DIM = 384
 
 # Safe batch size for Voyage AI (rate limit: 1,000 texts per request, 120K tokens/min)
 _VOYAGE_BATCH = 128
+_VOYAGE_EMBEDDINGS_URL = "https://api.voyageai.com/v1/embeddings"
+_VOYAGE_TIMEOUT_SECONDS = 30
 
 # Public constant callers can check
 VECTOR_DIM: int  # set in Embedder.__init__ as a class-level property
@@ -53,20 +57,20 @@ class Embedder:
 
         voyage_key = os.getenv("VOYAGE_API_KEY", "").strip()
         if voyage_key:
-            try:
-                import voyageai
-                self._voyage_client = voyageai.Client(api_key=voyage_key)
-                self._backend = "voyage"
-                self._voyage_model = "voyage-law-2"
-                self._dim = VOYAGE_DIM
-                self._batch_size = _VOYAGE_BATCH
-                logger.info(
-                    "Embedder: using Voyage AI (model=voyage-law-2, dim=%d)", VOYAGE_DIM
-                )
-            except Exception as exc:
-                raise EmbeddingError(
-                    f"Failed to initialise Voyage AI client: {exc}"
-                ) from exc
+            # Use Voyage's REST API directly. Importing the official Python SDK
+            # currently imports sentence-transformers, torch, transformers,
+            # pandas, and numpy even though remote embeddings do not need them.
+            # That consumes roughly 300+ MiB at process startup and exceeds the
+            # Render free-tier memory limit once FastAPI/Firebase are loaded.
+            self._voyage_key = voyage_key
+            self._backend = "voyage"
+            self._voyage_model = "voyage-law-2"
+            self._dim = VOYAGE_DIM
+            self._batch_size = _VOYAGE_BATCH
+            logger.info(
+                "Embedder: using Voyage AI REST API (model=voyage-law-2, dim=%d)",
+                VOYAGE_DIM,
+            )
         else:
             # Defer the actual SentenceTransformer/torch import+load until the
             # first embed call instead of doing it here in __init__. __init__
@@ -124,14 +128,30 @@ class Embedder:
 
     def _embed_voyage(self, batch: list[str], input_type: str) -> list[EmbeddingResult]:
         try:
-            response = self._voyage_client.embed(
-                batch,
-                model=self._voyage_model,
-                input_type=input_type,
+            response = requests.post(
+                _VOYAGE_EMBEDDINGS_URL,
+                headers={
+                    "Authorization": f"Bearer {self._voyage_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "input": batch,
+                    "model": self._voyage_model,
+                    "input_type": input_type,
+                },
+                timeout=_VOYAGE_TIMEOUT_SECONDS,
             )
+            response.raise_for_status()
+            payload = response.json()
+            data = sorted(payload.get("data", []), key=lambda item: item.get("index", 0))
+            vectors = [item["embedding"] for item in data]
+            if len(vectors) != len(batch):
+                raise ValueError(
+                    f"Voyage returned {len(vectors)} embeddings for {len(batch)} inputs."
+                )
             return [
                 EmbeddingResult(text=text, vector=vec)
-                for text, vec in zip(batch, response.embeddings)
+                for text, vec in zip(batch, vectors)
             ]
         except Exception as exc:
             raise EmbeddingError(

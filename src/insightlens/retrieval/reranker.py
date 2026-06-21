@@ -7,10 +7,14 @@ best evidence for the specific question asked.
 """
 from __future__ import annotations
 
+import logging
+import os
+
 from insightlens.storage.chunk_repository import RetrievedChunk
 
 _DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 _RERANK_THRESHOLD = 0.3  # chunks scoring below this are dropped as irrelevant
+logger = logging.getLogger(__name__)
 
 
 class Reranker:
@@ -19,6 +23,11 @@ class Reranker:
     def __init__(self, model: str = _DEFAULT_MODEL) -> None:
         self._model_name = model
         self._model = None
+        self._enabled = os.getenv("ATTICUS_LOCAL_RERANKER", "true").lower() not in {
+            "0",
+            "false",
+            "no",
+        }
 
     def rerank(
         self,
@@ -29,13 +38,23 @@ class Reranker:
     ) -> list[RetrievedChunk]:
         if not chunks:
             return []
+        if not self._enabled:
+            return chunks[:top_k]
         if self._model is None:
             # Deferred: importing sentence_transformers pulls in torch, which at
             # startup (before uvicorn binds its port) was racing Render's
             # port-scan timeout and OOM-killing the container on the 512Mi free
             # tier — same issue as Embedder, see insightlens.embeddings.embedder.
-            from sentence_transformers import CrossEncoder
-            self._model = CrossEncoder(self._model_name)
+            try:
+                from sentence_transformers import CrossEncoder
+                self._model = CrossEncoder(self._model_name)
+            except ImportError:
+                logger.warning(
+                    "sentence-transformers is not installed; returning fused retrieval "
+                    "results without local cross-encoder reranking."
+                )
+                self._enabled = False
+                return chunks[:top_k]
         pairs = [(query, chunk.chunk_text) for chunk in chunks]
         scores = self._model.predict(pairs).tolist()
         ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
