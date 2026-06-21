@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,14 +26,15 @@ from insightlens.storage.snowflake_client import open_connection
 
 _IMAGES_DIR = RAW_PDF_DIR.parent / "images"
 _SUPPORTED_EXTENSIONS = {".pdf", ".pptx"}
+logger = logging.getLogger(__name__)
 
 
 def _document_id(path: Path) -> str:
-    return hashlib.sha1(path.name.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1(path.name.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
 def _document_id_from_name(name: str) -> str:
-    return hashlib.sha1(name.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
 def _chunk_id(document_id: str, chunk_index: int) -> str:
@@ -59,11 +61,15 @@ class IngestService:
         cfg: AppConfig,
         embedder: Embedder,
         images_dir: Path | None = None,
+        fast_mode: bool = False,
+        enforce_plan_limits: bool = True,
     ) -> None:
         self._cfg = cfg
         self._embedder = embedder
         self._chunker = SlideAwareChunker()
         self._images_dir = images_dir or _IMAGES_DIR
+        self._fast_mode = fast_mode
+        self._enforce_plan_limits = enforce_plan_limits
         self._images_dir.mkdir(parents=True, exist_ok=True)
 
     def ingest(
@@ -102,7 +108,7 @@ class IngestService:
             if suffix == ".pptx":
                 parsed = parse_pptx(path)
             else:
-                parsed = parse_pdf(path)
+                parsed = parse_pdf(path, fast_mode=self._fast_mode)
         except (PDFParsingError, PPTXParsingError) as exc:
             return IngestResult(
                 document_id=document_id,
@@ -117,7 +123,7 @@ class IngestService:
         metadata = extract_metadata(Path(display_name), first_page_text)
 
         plan = default_plan()
-        if user_id and parsed.total_pages > plan.max_pages_per_pdf:
+        if self._enforce_plan_limits and user_id and parsed.total_pages > plan.max_pages_per_pdf:
             return IngestResult(
                 document_id=document_id,
                 file_name=display_name,
@@ -181,7 +187,7 @@ class IngestService:
                 try:
                     repo.delete_document(document_id, user_id)
                 except Exception:
-                    pass
+                    logger.debug("No prior document to replace: %s", document_id, exc_info=True)
                 repo.upsert_document(
                     DocumentRecord(
                         document_id=document_id,

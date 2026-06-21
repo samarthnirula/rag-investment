@@ -214,6 +214,15 @@ export function apiAssetUrl(path: string): string {
   return `${BASE}${path}`;
 }
 
+export async function fetchImageObjectUrl(path: string): Promise<string> {
+  const token = await getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(apiAssetUrl(path), { headers, credentials: "include" });
+  if (!res.ok) throw new Error("Image could not be loaded.");
+  return URL.createObjectURL(await res.blob());
+}
+
 export async function runQuery(
   payloadOrToken: {
     query: string;
@@ -253,6 +262,8 @@ export interface StreamResult {
   text: string;
   sources: string[];
   source_details?: SourceDetail[];
+  images?: ImageAttachment[];
+  image_note?: string | null;
   confidence?: Confidence;
 }
 
@@ -330,6 +341,8 @@ export async function runQueryStream(
             text: typeof data.text === "string" ? data.text : fullText,
             sources: (data.sources as string[]) ?? [],
             source_details: data.source_details as SourceDetail[] | undefined,
+            images: data.images as ImageAttachment[] | undefined,
+            image_note: data.image_note as string | null | undefined,
             confidence: data.confidence as Confidence | undefined,
           };
           break outer;

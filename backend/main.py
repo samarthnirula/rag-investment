@@ -434,6 +434,27 @@ def _assert_image_is_demo(conn, image_id: str) -> None:
         cur.close()
 
 
+def _assert_image_access(conn, image_id: str, user_id: str) -> None:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT d.user_id
+            FROM images i
+            JOIN documents d ON i.document_id = d.document_id
+            WHERE i.image_id = %s
+            """,
+            (image_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Image not found.")
+        if row[0] is not None and row[0] != user_id:
+            raise HTTPException(status_code=403, detail="You do not have access to this image.")
+    finally:
+        cur.close()
+
+
 def _image_file_path(record: ImageRecord) -> Path:
     raw = Path(record.file_path)
     path = raw if raw.is_absolute() else _REPO_ROOT / raw
@@ -449,7 +470,7 @@ def _image_file_path(record: ImageRecord) -> Path:
 def _image_payload(record: ImageRecord, source: str) -> dict:
     return {
         "image_id": record.image_id,
-        "url": f"/api/demo/images/{record.image_id}",
+        "url": f"/api/images/{record.image_id}",
         "source": source,
         "document_id": record.document_id,
         "page_number": record.page_number,
@@ -462,11 +483,15 @@ def _image_payload(record: ImageRecord, source: str) -> dict:
 
 def _is_image_gallery_query(query: str) -> bool:
     q = query.lower()
-    return any(
+    return bool(
+        re.search(r"\b(?:show|display|list|find|get)\b.{0,24}\b(?:images?|photos?|pictures?)\b", q)
+    ) or any(
         term in q
         for term in (
             "show images",
+            "show me images",
             "show photos",
+            "show me photos",
             "display images",
             "display photos",
             "extracted images",
@@ -528,7 +553,75 @@ def _sample_demo_images(conn, limit: int) -> list[ImageRecord]:
         cur.close()
 
 
-def _collect_demo_images(conn, sources, query_embedding, query: str, top_k: int = 10) -> list[dict]:
+def _sample_scoped_images(
+    conn,
+    sources,
+    case_id: str | None,
+    user_id: str,
+    limit: int,
+) -> list[ImageRecord]:
+    document_ids = list(dict.fromkeys(chunk.document_id for chunk in sources))
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT i.image_id, i.document_id, i.page_number, i.image_index,
+                   i.file_path, i.media_type, i.width, i.height, i.ai_description
+            FROM images i
+            JOIN documents d ON i.document_id = d.document_id
+            WHERE (d.user_id IS NULL OR d.user_id = %s)
+              AND (
+                    i.document_id = ANY(%s::text[])
+                    OR (
+                        %s::text IS NOT NULL
+                        AND EXISTS (
+                            SELECT 1 FROM case_documents cd
+                            WHERE cd.case_id = %s AND cd.document_id = i.document_id
+                        )
+                    )
+              )
+              AND COALESCE(i.ai_description, '') NOT ILIKE '%%nude%%'
+              AND COALESCE(i.ai_description, '') NOT ILIKE '%%naked%%'
+              AND COALESCE(i.ai_description, '') NOT ILIKE '%%sexual%%'
+              AND COALESCE(i.ai_description, '') NOT ILIKE '%%minor%%'
+              AND COALESCE(i.ai_description, '') NOT ILIKE '%%child%%'
+            ORDER BY
+                CASE WHEN i.document_id = ANY(%s::text[]) THEN 0 ELSE 1 END,
+                (i.ai_description IS NULL),
+                i.document_id, i.page_number, i.image_index
+            LIMIT %s
+            """,
+            (user_id, document_ids, case_id, case_id, document_ids, limit),
+        )
+        return [_row_to_image_record(row) for row in cur.fetchall()]
+    finally:
+        cur.close()
+
+
+def _row_to_image_record(row) -> ImageRecord:
+    return ImageRecord(
+        image_id=row[0],
+        document_id=row[1],
+        page_number=row[2],
+        image_index=row[3],
+        file_path=row[4],
+        media_type=row[5],
+        width=row[6],
+        height=row[7],
+        ai_description=row[8],
+    )
+
+
+def _collect_query_images(
+    conn,
+    sources,
+    query_embedding,
+    query: str,
+    *,
+    user_id: str,
+    case_id: str | None = None,
+    top_k: int = 10,
+) -> list[dict]:
     image_repo = ImageRepository(conn)
     seen: set[str] = set()
     images: list[dict] = []
@@ -537,10 +630,35 @@ def _collect_demo_images(conn, sources, query_embedding, query: str, top_k: int 
         for image in image_repo.get_images_for_page(chunk.document_id, chunk.page_number):
             if image.image_id in seen:
                 continue
+            try:
+                _image_file_path(image)
+            except HTTPException:
+                continue
             seen.add(image.image_id)
             images.append(_image_payload(image, f"Source {source_index} page image"))
             if len(images) >= top_k:
                 return images
+
+    if _is_image_gallery_query(query):
+        try:
+            for image in _sample_scoped_images(conn, sources, case_id, user_id, top_k):
+                if image.image_id in seen:
+                    continue
+                try:
+                    _image_file_path(image)
+                except HTTPException:
+                    continue
+                seen.add(image.image_id)
+                images.append(_image_payload(image, "Relevant workspace image"))
+                if len(images) >= top_k:
+                    return images
+        except Exception:
+            logger.warning("Failed to collect scoped gallery images", exc_info=True)
+
+    # A case workspace must never be padded with visually unrelated images from
+    # the global demo corpus.
+    if case_id is not None:
+        return images
 
     try:
         for image in image_repo.search_by_text_terms(
@@ -1213,6 +1331,24 @@ def create_app() -> FastAPI:
             logger.error("get_demo_image image_id=%s", image_id, exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error.")
 
+    @app.get("/api/images/{image_id}", tags=["query"])
+    def get_image(image_id: str, user: dict = Depends(require_user)):
+        if not _cfg:
+            raise HTTPException(status_code=503, detail="Service not ready.")
+        try:
+            with open_connection(_cfg.db) as conn:
+                _assert_image_access(conn, image_id, user["uid"])
+                image = ImageRepository(conn).get_image(image_id)
+                if image is None:
+                    raise HTTPException(status_code=404, detail="Image not found.")
+                path = _image_file_path(image)
+                return FileResponse(path, media_type=image.media_type or "image/png")
+        except HTTPException:
+            raise
+        except Exception:
+            logger.error("get_image image_id=%s uid=%s", image_id, user["uid"], exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error.")
+
     # ── Auth ──────────────────────────────────────────────────────────────────
     @app.post("/api/auth/session", tags=["auth"])
     def create_session_token(user: dict = Depends(require_user)):
@@ -1557,10 +1693,18 @@ def create_app() -> FastAPI:
                         sources.extend(_case_context_chunks(conn, req.case_id, user["uid"]))
                     elif _is_epstein:
                         sources.append(_epstein_people_context_chunk())
+                    images = _collect_query_images(
+                        conn,
+                        sources,
+                        None,
+                        clean_query,
+                        user_id=user["uid"],
+                        case_id=req.case_id,
+                    )
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc))
 
-            prompt   = build_user_prompt(clean_query, sources)
+            prompt   = build_user_prompt(clean_query, sources, image_attachments=images)
             response = _llm.generate(
                 _system_prompt_with_zep_context(SYSTEM_PROMPT, zep_context),
                 prompt,
@@ -1600,6 +1744,8 @@ def create_app() -> FastAPI:
                     for s in sources
                 ],
                 "source_details": _source_payload(sources, clean_query),
+                "images": images,
+                "image_note": _image_availability_note(sources, images),
             }
             if confidence:
                 result["confidence"] = confidence
@@ -1706,6 +1852,14 @@ def create_app() -> FastAPI:
                         sources.extend(_case_context_chunks(conn, req.case_id, user["uid"]))
                     elif _is_epstein:
                         sources.append(_epstein_people_context_chunk())
+                    images = _collect_query_images(
+                        conn,
+                        sources,
+                        None,
+                        clean_query,
+                        user_id=user["uid"],
+                        case_id=req.case_id,
+                    )
             except ValueError as exc:
                 yield _event({"error": str(exc)})
                 return
@@ -1716,7 +1870,11 @@ def create_app() -> FastAPI:
 
             # Stream generation
             try:
-                prompt          = build_user_prompt(clean_query, sources)
+                prompt          = build_user_prompt(
+                    clean_query,
+                    sources,
+                    image_attachments=images,
+                )
                 system          = _system_prompt_with_zep_context(SYSTEM_PROMPT, zep_context)
                 full_parts: list[str] = []
 
@@ -1738,6 +1896,8 @@ def create_app() -> FastAPI:
                     "text":           clean_response,
                     "sources":        [f"{s.file_name} · p.{s.page_number}" for s in sources],
                     "source_details": _source_payload(sources, clean_query),
+                    "images":         images,
+                    "image_note":     _image_availability_note(sources, images),
                 }
                 if confidence:
                     done_event["confidence"] = confidence

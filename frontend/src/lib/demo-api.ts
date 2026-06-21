@@ -15,10 +15,25 @@ const BASE = (
 ).replace(/\/+$/, "");
 const TOKEN_KEY = "demo_token";
 const REQUEST_TIMEOUT_MS = 120000;
+const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 
-async function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+export class DemoApiError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message);
+    this.name = "DemoApiError";
+  }
+}
+
+export function isDemoUnauthorized(error: unknown): boolean {
+  return error instanceof DemoApiError && error.status === 401;
+}
+
+async function withTimeout<T>(
+  run: (signal: AbortSignal) => Promise<T>,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+): Promise<T> {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await run(controller.signal);
   } catch (err) {
@@ -34,6 +49,19 @@ async function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>): Promise
 export function getDemoToken(): string | null {
   if (typeof window === "undefined") return null;
   return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY);
+}
+
+export function getCachedDemoUserSlug(): string | null {
+  const token = getDemoToken();
+  if (!token) return null;
+  try {
+    const encoded = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "=");
+    const payload = JSON.parse(atob(padded));
+    return typeof payload.user_slug === "string" ? payload.user_slug : null;
+  } catch {
+    return null;
+  }
 }
 
 export function setDemoToken(token: string): void {
@@ -63,7 +91,7 @@ async function demoRequest<T>(path: string, opts: RequestInit = {}): Promise<T> 
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || "Request failed");
+    throw new DemoApiError(err.detail || "Request failed", res.status);
   }
   return res.json() as Promise<T>;
 }
@@ -87,7 +115,12 @@ export async function demoAuth(
   });
 }
 
-export async function demoMe(): Promise<{ user_slug: string; query_count: number; last_active: string | null }> {
+export async function demoMe(): Promise<{
+  user_slug: string;
+  query_count: number;
+  last_active: string | null;
+  unlimited?: boolean;
+}> {
   return demoRequest("/api/demo/me");
 }
 
@@ -125,13 +158,15 @@ export async function demoUploadCase(files: File[], caseName: string): Promise<D
   }
   form.append("case_name", caseName);
 
-  const res = await withTimeout((signal) =>
-    fetch(`${BASE}/api/demo/cases/upload`, {
-      method: "POST",
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      body: form,
-      signal,
-    })
+  const res = await withTimeout(
+    (signal) =>
+      fetch(`${BASE}/api/demo/cases/upload`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: form,
+        signal,
+      }),
+    UPLOAD_TIMEOUT_MS,
   );
 
   if (!res.ok) {

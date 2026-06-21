@@ -97,7 +97,7 @@ def _tag_footnotes(text: str) -> str:
     return "\n".join(result)
 
 
-def parse_pdf(path: Path) -> ParsedDocument:
+def parse_pdf(path: Path, *, fast_mode: bool = False) -> ParsedDocument:
     """Extract text and tables from a PDF, one entry per page."""
     if not path.exists():
         raise PDFParsingError(f"PDF not found: {path}")
@@ -118,8 +118,11 @@ def parse_pdf(path: Path) -> ParsedDocument:
                 slide_title = _extract_slide_title(stripped)
 
                 # Extract structured tables via pdfplumber (preserves row/column layout).
-                plumber_page = plumber_doc.pages[index]
-                raw_tables = plumber_page.extract_tables() or []
+                raw_tables = (
+                    []
+                    if fast_mode
+                    else (plumber_doc.pages[index].extract_tables() or [])
+                )
                 tables = tuple(
                     tuple(
                         tuple(str(cell or "") for cell in row)
@@ -135,14 +138,14 @@ def parse_pdf(path: Path) -> ParsedDocument:
                 # that text extraction cannot access (bar charts, geographic maps,
                 # tenant logo tables, etc.).
                 vision_text: str | None = None
-                if len(stripped) < _VISION_CALL_THRESHOLD:
+                if not fast_mode and len(stripped) < _VISION_CALL_THRESHOLD:
                     vision_text = extract_visual_content(page) or None
 
                 # OCR fallback: for truly blank text layers (scanned PDFs) where
                 # neither native text extraction nor vision produced anything useful,
                 # run Tesseract OCR directly on the rendered page image.
                 # Only activates when pytesseract + tesseract binary are installed.
-                if len(stripped) < 50 and not vision_text:
+                if not fast_mode and len(stripped) < 50 and not vision_text:
                     ocr_result = extract_text_with_ocr(page)
                     if ocr_result:
                         stripped = _tag_footnotes(ocr_result)

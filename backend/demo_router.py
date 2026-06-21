@@ -8,7 +8,7 @@ import time
 import tempfile
 import uuid as _uuid
 import json as _json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -17,6 +17,7 @@ import bcrypt
 import jwt
 from fastapi import APIRouter, Header, HTTPException, Depends, UploadFile, File, Form
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 from insightlens.demo.epstein_people import epstein_people_context_text
 
 logger = logging.getLogger("atticus.demo")
@@ -83,7 +84,6 @@ def _secret_key() -> str:
 def _sign_token(user_slug: str) -> str:
     payload = {
         "user_slug": user_slug,
-        "exp": datetime.now(timezone.utc) + timedelta(hours=8),
         "iat": datetime.now(timezone.utc),
     }
     return jwt.encode(payload, _secret_key(), algorithm="HS256")
@@ -91,10 +91,16 @@ def _sign_token(user_slug: str) -> str:
 
 def _verify_token(token: str) -> str:
     try:
-        payload = jwt.decode(token, _secret_key(), algorithms=["HS256"])
+        # Demo access is intentionally browser-cache scoped: the token remains
+        # valid until the tester signs out or clears site storage. Disabling
+        # expiry also preserves previously issued tokens that contained `exp`.
+        payload = jwt.decode(
+            token,
+            _secret_key(),
+            algorithms=["HS256"],
+            options={"verify_exp": False},
+        )
         return payload["user_slug"]
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Demo session expired.")
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid demo session.")
 
@@ -125,9 +131,20 @@ def _assert_demo_case_owned(conn, case_id: str, user_slug: str) -> None:
 # ── Rate limiter for demo (20 queries/hour) ───────────────────────────────────
 _DEMO_RATE_LIMIT = 20
 _DEMO_WINDOW_S   = 3600
+_UNLIMITED_DEMO_USERS = {
+    slug.strip()
+    for slug in os.getenv("UNLIMITED_DEMO_USERS", "user3").split(",")
+    if slug.strip()
+}
+
+
+def _is_unlimited_demo_user(user_slug: str) -> bool:
+    return user_slug in _UNLIMITED_DEMO_USERS
 
 
 def _check_demo_rate(user_slug: str) -> None:
+    if _is_unlimited_demo_user(user_slug):
+        return
     try:
         try:
             from backend.rate_limiter import _redis_check
@@ -1139,6 +1156,7 @@ def demo_me(user_slug: str = Depends(_get_demo_user)):
             "user_slug": user_slug,
             "query_count": row[0] if row else 0,
             "last_active": row[1].isoformat() if row and row[1] else None,
+            "unlimited": _is_unlimited_demo_user(user_slug),
         }
     except Exception as exc:
         logger.error("demo_me: %s", exc, exc_info=True)
@@ -1185,7 +1203,8 @@ async def demo_upload_case(
 
     if not files:
         raise HTTPException(status_code=400, detail="Choose at least one PDF or PPTX file.")
-    if len(files) > 8:
+    unlimited = _is_unlimited_demo_user(user_slug)
+    if not unlimited and len(files) > 8:
         raise HTTPException(status_code=413, detail="Demo upload is limited to 8 files.")
 
     cfg = load_config()
@@ -1194,17 +1213,25 @@ async def demo_upload_case(
 
     try:
         with open_connection(cfg.db) as conn:
-            existing_cases = CasesRepository(conn).list_cases(uid)
-            if existing_cases:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Demo sessions can upload one full case only. Use the existing uploaded case or restart the demo session.",
+            case_repo = CasesRepository(conn)
+            existing_cases = case_repo.list_cases(uid)
+            if existing_cases and not unlimited:
+                # A browser timeout can lose the successful response after the
+                # backend has already created or partially populated the case.
+                # Reuse that one allowed case so retries are idempotent instead
+                # of permanently locking the tester out.
+                case_id = existing_cases[0].case_id
+                case_repo.update_case(
+                    case_id,
+                    safe_case_name,
+                    "Demo-uploaded case. Uploaded files are user-provided and separate from the public Epstein corpus.",
                 )
-            case_id = CasesRepository(conn).create_case(
-                uid,
-                safe_case_name,
-                "Demo-uploaded case. Uploaded files are user-provided and separate from the public Epstein corpus.",
-            )
+            else:
+                case_id = case_repo.create_case(
+                    uid,
+                    safe_case_name,
+                    "Demo-uploaded case. Uploaded files are user-provided and separate from the public Epstein corpus.",
+                )
     except HTTPException:
         raise
     except Exception:
@@ -1212,7 +1239,12 @@ async def demo_upload_case(
         raise HTTPException(status_code=500, detail="Failed to create demo case.")
 
     embedder = Embedder(model=cfg.embedding_model)
-    ingest = IngestService(cfg=cfg, embedder=embedder)
+    ingest = IngestService(
+        cfg=cfg,
+        embedder=embedder,
+        fast_mode=True,
+        enforce_plan_limits=not unlimited,
+    )
     temp_dir = Path(tempfile.gettempdir()) / "atticus_demo_uploads"
     temp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1229,14 +1261,19 @@ async def demo_upload_case(
         except Exception:
             skipped.append(f"{original_name}: could not read file")
             continue
-        if len(contents) > 25 * 1024 * 1024:
+        if not unlimited and len(contents) > 25 * 1024 * 1024:
             skipped.append(f"{original_name}: demo limit is 25 MB per file")
             continue
 
         tmp_path = temp_dir / f"{_uuid.uuid4().hex}_{Path(original_name).name}"
         try:
             tmp_path.write_bytes(contents)
-            result = ingest.ingest(tmp_path, user_id=uid, original_file_name=original_name)
+            result = await run_in_threadpool(
+                ingest.ingest,
+                tmp_path,
+                user_id=uid,
+                original_file_name=original_name,
+            )
             if result.error:
                 skipped.append(f"{original_name}: {result.error}")
                 continue
@@ -1271,7 +1308,9 @@ async def demo_upload_case(
         # Roll it back so the user can simply try again.
         try:
             with open_connection(cfg.db) as conn:
-                CasesRepository(conn).delete_case(case_id)
+                existing_docs = CasesRepository(conn).get_case_document_ids(case_id)
+                if not existing_docs:
+                    CasesRepository(conn).delete_case(case_id)
         except Exception:
             logger.warning("demo_upload_case: failed to roll back empty case=%s", case_id, exc_info=True)
         raise HTTPException(status_code=422, detail="No files could be ingested. " + "; ".join(skipped[:3]))
@@ -1464,29 +1503,37 @@ def demo_timeline(user_slug: str = Depends(_get_demo_user)):
     try:
         with open_connection(cfg.db) as conn:
             cur = conn.cursor()
-            cur.execute(
-                """SELECT ct.events, ct.generated_at
-                   FROM case_timelines ct
-                   JOIN cases c ON ct.case_id = c.case_id
-                   WHERE COALESCE(c.is_demo, FALSE) = TRUE OR c.user_id IS NULL
-                   ORDER BY COALESCE(c.is_demo, FALSE) DESC, ct.generated_at DESC
-                   LIMIT 1"""
-            )
-            row = cur.fetchone()
-            cur.close()
+            try:
+                cur.execute(
+                    """SELECT ct.events, ct.generated_at
+                       FROM case_timelines ct
+                       JOIN cases c ON ct.case_id = c.case_id
+                       WHERE COALESCE(c.is_demo, FALSE) = TRUE OR c.user_id IS NULL
+                       ORDER BY COALESCE(c.is_demo, FALSE) DESC, ct.generated_at DESC
+                       LIMIT 1"""
+                )
+                row = cur.fetchone()
+            finally:
+                cur.close()
+
+            events = row[0] if row and row[0] else _FALLBACK_TIMELINE_EVENTS
+            # Image matching must happen while this connection is still borrowed.
+            # Using it after the context exits races with other pool borrowers.
+            try:
+                events = _attach_timeline_images(conn, events)
+            except Exception:
+                logger.warning("demo_timeline: image enrichment failed", exc_info=True)
+
         if row is None:
             return {
                 "pending": False,
-                "events": _attach_timeline_images(conn, _FALLBACK_TIMELINE_EVENTS),
+                "events": events,
                 "generated_at": None,
                 "note": "Using the shared demo timeline.",
             }
-        events = row[0] if row[0] else []
-        if not events:
-            events = _FALLBACK_TIMELINE_EVENTS
         return {
             "pending": False,
-            "events": _attach_timeline_images(conn, events),
+            "events": events,
             "generated_at": row[1].isoformat() if row[1] else None,
         }
     except Exception as exc:

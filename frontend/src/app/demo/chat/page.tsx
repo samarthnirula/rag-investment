@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   getDemoToken,
+  getCachedDemoUserSlug,
   clearDemoToken,
   demoAssetUrl,
   demoMe,
@@ -306,6 +307,7 @@ export default function DemoChatPage() {
   const router = useRouter();
   const [userSlug, setUserSlug]         = useState<string | null>(null);
   const [queryCount, setQueryCount]     = useState(0);
+  const [unlimited, setUnlimited]       = useState(false);
   const [activeTab, setActiveTab]       = useState<Tab>("chat");
   const [messages, setMessages]         = useState<ChatMessage[]>([]);
   const [input, setInput]               = useState("");
@@ -330,10 +332,16 @@ export default function DemoChatPage() {
   // Auth guard
   useEffect(() => {
     if (!getDemoToken()) { router.replace("/demo"); return; }
+    const cachedSlug = getCachedDemoUserSlug();
+    if (cachedSlug) {
+      setUserSlug(cachedSlug);
+      setUnlimited(cachedSlug === "user3");
+    }
     demoMe()
       .then(async (me) => {
         setUserSlug(me.user_slug);
         setQueryCount(me.query_count);
+        setUnlimited(Boolean(me.unlimited));
         const loadedCases = await demoCases().catch(() => []);
         setCases(loadedCases);
         const cachedCaseId = localStorage.getItem(activeCaseStorageKey(me.user_slug));
@@ -346,7 +354,10 @@ export default function DemoChatPage() {
           localStorage.setItem(activeCaseStorageKey(me.user_slug), loadedCases[0].case_id);
         }
       })
-      .catch(() => { clearDemoToken(); router.replace("/demo"); });
+      .catch(() => {
+        // Never discard intake completion automatically. The cached session is
+        // cleared only by explicit sign-out or browser storage controls.
+      });
   }, [router]);
 
   // Scroll to bottom on new messages
@@ -370,6 +381,13 @@ export default function DemoChatPage() {
     catch { setOverview({ pending: true, summary: "", parties: [], key_issues: [], note: "Failed to load overview." }); }
     finally { setOvLoading(false); }
   }, [overview, ovLoading]);
+
+  // Also load from tab state so rapid clicks during initial auth/render cannot
+  // leave a selected tab with no request in flight.
+  useEffect(() => {
+    if (activeTab === "timeline") void loadTimeline();
+    if (activeTab === "overview") void loadOverview();
+  }, [activeTab, loadTimeline, loadOverview]);
 
   function switchTab(tab: Tab) {
     setActiveTab(tab);
@@ -449,10 +467,6 @@ export default function DemoChatPage() {
   }
 
   async function handleDemoCaseUpload() {
-    if (cases.length > 0) {
-      setCaseUploadError("Demo sessions can upload one full case only.");
-      return;
-    }
     if (caseUploading || caseFiles.length === 0) return;
     const name = caseName.trim() || "Uploaded Case";
     setCaseUploading(true);
@@ -511,7 +525,9 @@ export default function DemoChatPage() {
       const msg = err instanceof Error ? err.message : "Unknown error";
       let display = "Something went wrong. Please try again.";
       if (msg.includes("rate limit") || msg.includes("RATE_LIMIT")) display = "Rate limit reached (20 queries/hour). Try again later.";
-      if (msg.includes("401") || msg.includes("Unauthorized")) { clearDemoToken(); router.replace("/demo"); return; }
+      if (msg.includes("401") || msg.includes("Invalid demo session")) {
+        display = "The backend rejected this cached session. Please sign out and enter the demo code again.";
+      }
       setMessages((prev) => [...prev, { role: "assistant", content: display }]);
     } finally {
       setLoading(false);
@@ -560,12 +576,14 @@ export default function DemoChatPage() {
           <button
             type="button"
             onClick={() => {
-              if (!hasUploadedDemoCase) setShowCaseModal(true);
+              if (hasUploadedDemoCase && !caseName.trim()) {
+                setCaseName(cases[0]?.case_name || "Uploaded Case");
+              }
+              setShowCaseModal(true);
             }}
-            disabled={hasUploadedDemoCase}
-            title={hasUploadedDemoCase ? "Demo limit reached: one uploaded case only" : "Add a case"}
+            title={hasUploadedDemoCase ? "Retry or add files to your demo case" : "Add a case"}
             aria-label="Add a case"
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03] text-lg font-semibold text-zinc-300 transition-colors hover:border-indigo-400/30 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-white/[0.08] disabled:hover:bg-white/[0.03]"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03] text-lg font-semibold text-zinc-300 transition-colors hover:border-indigo-400/30 hover:bg-white/[0.06]"
           >
             +
           </button>
@@ -610,7 +628,7 @@ export default function DemoChatPage() {
               <span className="shrink-0 text-[0.6rem] text-zinc-700">{demoCase.document_count}</span>
             </button>
           ))}
-          {hasUploadedDemoCase && (
+          {hasUploadedDemoCase && !unlimited && (
             <p className="mt-3 rounded-lg border border-amber-400/15 bg-amber-400/5 px-3 py-2 text-[0.65rem] leading-relaxed text-amber-200/70">
               Demo upload limit reached: one full case per session.
             </p>
@@ -637,7 +655,7 @@ export default function DemoChatPage() {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <UsageBar used={queryCount} limit={DEMO_HOURLY_LIMIT} />
+          {!unlimited && <UsageBar used={queryCount} limit={DEMO_HOURLY_LIMIT} />}
           {userSlug && (
             <span className="text-xs text-zinc-500 bg-white/[0.05] border border-white/[0.08] rounded-full px-2.5 py-1">
               {userSlug} · {queryCount} queries
@@ -865,7 +883,9 @@ export default function DemoChatPage() {
                     ? `${caseFiles.length} file${caseFiles.length === 1 ? "" : "s"} selected`
                     : "Drop a folder or PDF/PPTX files here"}
                 </span>
-                <span className="text-xs text-zinc-600">Demo limit: 8 files, 25 MB each</span>
+                <span className="text-xs text-zinc-600">
+                  {unlimited ? "No upload limits for this demo account" : "Demo limit: 8 files, 25 MB each"}
+                </span>
                 <div className="flex flex-wrap justify-center gap-2">
                   <button
                     type="button"

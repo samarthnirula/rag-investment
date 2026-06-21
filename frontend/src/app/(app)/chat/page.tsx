@@ -15,9 +15,10 @@ import {
   saveMessage,
   runQueryStream,
   listCompanies,
-  apiAssetUrl,
+  fetchImageObjectUrl,
   ChatSummary,
   Confidence,
+  ImageAttachment,
   Message,
   SourceDetail,
 } from "@/lib/api";
@@ -31,6 +32,55 @@ interface ActiveImage {
   src: string;
   alt: string;
   caption?: string;
+}
+
+function EvidenceImage({
+  image,
+  onOpen,
+}: {
+  image: ImageAttachment;
+  onOpen: (src: string) => void;
+}) {
+  const [src, setSrc] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl = "";
+    fetchImageObjectUrl(image.url)
+      .then((url) => {
+        objectUrl = url;
+        if (active) setSrc(url);
+        else URL.revokeObjectURL(url);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [image.url]);
+
+  if (!src) {
+    return <div className="h-32 w-full animate-pulse bg-white/[0.04]" />;
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(src)}
+      className="group overflow-hidden rounded-lg border border-white/[0.09] bg-white/[0.03] text-left transition-opacity hover:opacity-90"
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={src}
+        alt={image.description || `Extracted image from page ${image.page_number}`}
+        className="h-32 w-full object-contain bg-black/30 transition-transform group-hover:scale-[1.02]"
+        loading="lazy"
+      />
+      <div className="px-2.5 py-2 text-[0.65rem] text-zinc-500">
+        {image.source} · p.{image.page_number} · image {image.image_index + 1}
+      </div>
+    </button>
+  );
 }
 
 interface WorkspaceSelection {
@@ -374,6 +424,8 @@ export default function ChatPage() {
           content: result.text,
           sources: result.sources,
           sourceDetails: result.source_details,
+          images: result.images,
+          imageNote: result.image_note,
           query: inputText,
           confidence: result.confidence,
         };
@@ -617,29 +669,17 @@ export default function ChatPage() {
                       </p>
                       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                         {msg.images.map((image) => (
-                          <button
+                          <EvidenceImage
                             key={image.image_id}
-                            type="button"
-                            onClick={() =>
+                            image={image}
+                            onOpen={(src) =>
                               setActiveImage({
-                                src: apiAssetUrl(image.url),
+                                src,
                                 alt: image.description || `Extracted image from page ${image.page_number}`,
                                 caption: `${image.source} · p.${image.page_number} · image ${image.image_index + 1}`,
                               })
                             }
-                            className="group overflow-hidden rounded-lg border border-white/[0.09] bg-white/[0.03] text-left transition-opacity hover:opacity-90"
-                          >
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img
-                              src={apiAssetUrl(image.url)}
-                              alt={image.description || `Extracted image from page ${image.page_number}`}
-                              className="h-32 w-full object-contain bg-black/30 transition-transform group-hover:scale-[1.02]"
-                              loading="lazy"
-                            />
-                            <div className="px-2.5 py-2 text-[0.65rem] text-zinc-500">
-                              {image.source} · p.{image.page_number} · image {image.image_index + 1}
-                            </div>
-                          </button>
+                          />
                         ))}
                       </div>
                     </div>

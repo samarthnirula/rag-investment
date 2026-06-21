@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { demoAuth, demoMe, setDemoToken, getDemoToken, clearDemoToken } from "@/lib/demo-api";
+import { setDemoToken, getDemoToken, demoAuth } from "@/lib/demo-api";
 
 export default function DemoEntryPage() {
   const router = useRouter();
@@ -18,9 +18,8 @@ export default function DemoEntryPage() {
 
   useEffect(() => {
     if (!getDemoToken()) return;
-    demoMe()
-      .then(() => router.replace("/demo/chat"))
-      .catch(() => clearDemoToken());
+    // Browser storage is the source of truth for demo intake completion.
+    router.replace("/demo/chat");
   }, [router]);
 
   async function handleSubmit(e: React.FormEvent) {
