@@ -3,8 +3,28 @@
  * Uses a demo JWT cached in browser storage — no Firebase.
  */
 
-const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const DEFAULT_BASE =
+  process.env.NODE_ENV === "production"
+    ? "https://atticus-backend.onrender.com"
+    : "http://localhost:8000";
+const BASE = (process.env.NEXT_PUBLIC_API_URL || DEFAULT_BASE).replace(/\/+$/, "");
 const TOKEN_KEY = "demo_token";
+const REQUEST_TIMEOUT_MS = 20000;
+
+async function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await run(controller.signal);
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error("Request timed out while waiting for the Atticus backend.");
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
 
 export function getDemoToken(): string | null {
   if (typeof window === "undefined") return null;
@@ -34,7 +54,7 @@ async function demoRequest<T>(path: string, opts: RequestInit = {}): Promise<T> 
   };
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
-  const res = await fetch(`${BASE}${path}`, { ...opts, headers });
+  const res = await withTimeout((signal) => fetch(`${BASE}${path}`, { ...opts, headers, signal }));
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
@@ -100,11 +120,14 @@ export async function demoUploadCase(files: File[], caseName: string): Promise<D
   }
   form.append("case_name", caseName);
 
-  const res = await fetch(`${BASE}/api/demo/cases/upload`, {
-    method: "POST",
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-    body: form,
-  });
+  const res = await withTimeout((signal) =>
+    fetch(`${BASE}/api/demo/cases/upload`, {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+      signal,
+    })
+  );
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));

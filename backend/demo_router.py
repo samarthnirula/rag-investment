@@ -1074,41 +1074,48 @@ def auth_demo(req: AuthRequest):
 
     for user_slug, stored_hash in rows:
         try:
-            if bcrypt.checkpw(raw_code.encode(), stored_hash.encode()):
-                # Save whatever contact info was provided at redemption.
-                # COALESCE keeps any previously-saved value if this particular
-                # login didn't resend it (e.g. an old cached frontend build,
-                # or a field left blank) — so a later login can't blank out
-                # info captured on an earlier one.
-                first_name = (req.first_name or "").strip() or None
-                last_name = (req.last_name or "").strip() or None
-                email = (req.email or "").strip() or None
-                phone = (req.phone or "").strip() or None
-                if any([first_name, last_name, email, phone]):
-                    try:
-                        with open_connection(cfg.db) as conn2:
-                            cur2 = conn2.cursor()
-                            cur2.execute(
-                                """UPDATE demo.sessions
-                                   SET first_name = COALESCE(%s, first_name),
-                                       last_name  = COALESCE(%s, last_name),
-                                       email      = COALESCE(%s, email),
-                                       phone      = COALESCE(%s, phone),
-                                       info_submitted_at = NOW()
-                                   WHERE user_slug = %s""",
-                                (first_name, last_name, email, phone, user_slug),
-                            )
-                            conn2.commit()
-                            cur2.close()
-                    except Exception:
-                        # Never block login on a failure to save contact info —
-                        # the demo session itself is more important than the
-                        # CRM-style bookkeeping.
-                        logger.warning("auth_demo: failed to save contact info for %s", user_slug, exc_info=True)
-                token = _sign_token(user_slug)
-                return {"user_slug": user_slug, "token": token, "ok": True}
-        except Exception:
+            code_matches = bcrypt.checkpw(raw_code.encode(), stored_hash.encode())
+        except ValueError:
+            logger.warning("auth_demo: stored hash for %s is invalid", user_slug, exc_info=True)
             continue
+
+        if code_matches:
+            # Save whatever contact info was provided at redemption.
+            # COALESCE keeps any previously-saved value if this particular
+            # login didn't resend it (e.g. an old cached frontend build,
+            # or a field left blank) — so a later login can't blank out
+            # info captured on an earlier one.
+            first_name = (req.first_name or "").strip() or None
+            last_name = (req.last_name or "").strip() or None
+            email = (req.email or "").strip() or None
+            phone = (req.phone or "").strip() or None
+            if any([first_name, last_name, email, phone]):
+                try:
+                    with open_connection(cfg.db) as conn2:
+                        cur2 = conn2.cursor()
+                        cur2.execute(
+                            """UPDATE demo.sessions
+                               SET first_name = COALESCE(%s, first_name),
+                                   last_name  = COALESCE(%s, last_name),
+                                   email      = COALESCE(%s, email),
+                                   phone      = COALESCE(%s, phone),
+                                   info_submitted_at = NOW()
+                               WHERE user_slug = %s""",
+                            (first_name, last_name, email, phone, user_slug),
+                        )
+                        conn2.commit()
+                        cur2.close()
+                except Exception:
+                    # Never block login on a failure to save contact info —
+                    # the demo session itself is more important than the
+                    # CRM-style bookkeeping.
+                    logger.warning("auth_demo: failed to save contact info for %s", user_slug, exc_info=True)
+            try:
+                token = _sign_token(user_slug)
+            except Exception as exc:
+                logger.error("auth_demo: failed to sign demo token for %s: %s", user_slug, exc, exc_info=True)
+                raise HTTPException(status_code=500, detail="Demo auth is not configured correctly.")
+            return {"user_slug": user_slug, "token": token, "ok": True}
 
     raise HTTPException(status_code=401, detail="Invalid access code.")
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import queue
 import threading
+import logging
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -40,6 +41,8 @@ SnowflakeConnection = psycopg2.extensions.connection
 
 POOL_SIZE    = int(os.getenv("PG_POOL_SIZE", "5"))
 POOL_TIMEOUT = 30  # seconds to wait for a free connection
+CONNECT_TIMEOUT = int(os.getenv("PG_CONNECT_TIMEOUT", "10"))
+logger = logging.getLogger(__name__)
 
 _pools: dict[str, "_ConnectionPool"] = {}
 _registry_lock = threading.Lock()
@@ -58,12 +61,12 @@ class _ConnectionPool:
         for _ in range(size):
             try:
                 self._pool.put_nowait(self._new_conn())
-            except Exception:
-                pass  # Pool may start partially filled; grows on demand
+            except Exception as exc:
+                logger.debug("PostgreSQL pool started with one fewer warm connection: %s", exc)
 
     def _new_conn(self) -> SnowflakeConnection:
         try:
-            conn = psycopg2.connect(self._cfg.database_url)
+            conn = psycopg2.connect(self._cfg.database_url, connect_timeout=CONNECT_TIMEOUT)
             conn.autocommit = True
             return conn
         except psycopg2.Error as exc:
@@ -93,8 +96,8 @@ class _ConnectionPool:
             if not self._is_alive(conn):
                 try:
                     conn.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Failed to close stale PostgreSQL connection: %s", exc)
                 conn = self._new_conn()
 
         errored = False
@@ -107,8 +110,8 @@ class _ConnectionPool:
             if temporary or errored:
                 try:
                     conn.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Failed to close discarded PostgreSQL connection: %s", exc)
             else:
                 try:
                     self._pool.put_nowait(conn)

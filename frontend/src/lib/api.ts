@@ -9,7 +9,11 @@
 
 import { auth } from "@/lib/firebase";
 
-const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const DEFAULT_BASE =
+  process.env.NODE_ENV === "production"
+    ? "https://atticus-backend.onrender.com"
+    : "http://localhost:8000";
+const BASE = (process.env.NEXT_PUBLIC_API_URL || DEFAULT_BASE).replace(/\/+$/, "");
 
 /** Fetch a fresh (auto-refreshed) Firebase ID token for the current user. */
 async function getToken(): Promise<string> {

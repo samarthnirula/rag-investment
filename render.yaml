@@ -29,7 +29,11 @@ services:
       - key: ADMIN_API_KEY
         sync: false   # generate with `python scripts/generate_secrets.py`
       - key: APP_URL
-        sync: false   # your real frontend origin, e.g. https://atticus.law — CORS depends on this
+        sync: false   # your primary frontend origin, e.g. https://atticus.law
+      - key: CORS_ORIGINS
+        sync: false   # comma-separated Vercel/custom origins, e.g. https://your-app.vercel.app,https://atticus.law
+      - key: CORS_ORIGIN_REGEX
+        sync: false   # optional, e.g. ^https://.*\.vercel\.app$
       # ── Voyage embeddings — set this to skip loading sentence-transformers/torch ──
       - key: VOYAGE_API_KEY
         sync: false
