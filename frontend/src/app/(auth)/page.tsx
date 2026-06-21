@@ -1,12 +1,11 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
 import { AuthPanel } from "@/components/AuthPanel";
 import { Typewriter } from "@/components/Typewriter";
-import { TrialInterstitial } from "@/components/TrialInterstitial";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import dynamic from "next/dynamic";
 
 const ScalesOfJustice = dynamic(
@@ -22,7 +21,6 @@ function LandingPageInner() {
   const [showAuth, setShowAuth] = useState(false);
   const [tab, setTab] = useState<"signin" | "signup">("signin");
   const [isTrial, setIsTrial] = useState(false);
-  const [showInterstitial, setShowInterstitial] = useState(false);
   const [scrolled, setScrolled] = useState(false);
 
   useEffect(() => {
@@ -43,9 +41,9 @@ function LandingPageInner() {
     return () => window.removeEventListener("scroll", handleScroll);
   }, []);
 
-  const handleTrialSignup = useCallback(() => {
-    setShowInterstitial(true);
-  }, []);
+  function handleTrialSignup() {
+    router.push("/demo");
+  }
 
   function handleSignIn() {
     setIsTrial(false);
@@ -92,13 +90,6 @@ function LandingPageInner() {
           isTrial={isTrial}
         />
       )}
-
-      {/* ── INTERSTITIAL ──────────────────────────────────── */}
-      <AnimatePresence>
-        {showInterstitial && (
-          <TrialInterstitial onComplete={() => setShowInterstitial(false)} />
-        )}
-      </AnimatePresence>
 
       {/* ── HERO ────────────────────────────────────────────── */}
       <section className="relative overflow-hidden gradient-mesh pt-20">
