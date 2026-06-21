@@ -27,8 +27,13 @@ export default function DemoEntryPage() {
       const result = await demoAuth(trimmed);
       setDemoToken(result.token);
       router.push("/demo/chat");
-    } catch {
-      setError("Invalid access code. Please try again.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "";
+      setError(
+        /failed to fetch|network|cors/i.test(message)
+          ? "Could not reach the Atticus backend. Check NEXT_PUBLIC_API_URL and backend CORS settings."
+          : message || "Invalid access code. Please try again."
+      );
       setShake(true);
       setTimeout(() => setShake(false), 600);
       setCode("");
