@@ -157,6 +157,9 @@ export default function DemoAdminPage() {
                 <thead>
                   <tr className="border-b border-white/[0.05]">
                     <th className="text-left px-6 py-3 text-zinc-600 font-normal">User</th>
+                    <th className="text-left px-6 py-3 text-zinc-600 font-normal">Name</th>
+                    <th className="text-left px-6 py-3 text-zinc-600 font-normal">Email</th>
+                    <th className="text-left px-6 py-3 text-zinc-600 font-normal">Phone</th>
                     <th className="text-right px-6 py-3 text-zinc-600 font-normal">Queries</th>
                     <th className="text-right px-6 py-3 text-zinc-600 font-normal">Cost</th>
                     <th className="text-right px-6 py-3 text-zinc-600 font-normal">Last Active</th>
@@ -166,13 +169,16 @@ export default function DemoAdminPage() {
                   {data.by_user.map((u, i) => (
                     <tr key={u.user_slug ? `user-${u.user_slug}` : `user-row-${i}`} className="border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors">
                       <td className="px-6 py-3 font-mono text-indigo-300">{u.user_slug || "—"}</td>
+                      <td className="px-6 py-3 text-zinc-300">{[u.first_name, u.last_name].filter(Boolean).join(" ") || "—"}</td>
+                      <td className="px-6 py-3 text-zinc-400">{u.email || "—"}</td>
+                      <td className="px-6 py-3 text-zinc-400">{u.phone || "—"}</td>
                       <td className="px-6 py-3 text-right text-zinc-400 tabular-nums">{u.query_count}</td>
                       <td className="px-6 py-3 text-right text-zinc-300 tabular-nums">{fmt(u.cost_usd)}</td>
                       <td className="px-6 py-3 text-right text-zinc-600">{fmtDate(u.last_active)}</td>
                     </tr>
                   ))}
                   {data.by_user.length === 0 && (
-                    <tr><td colSpan={4} className="px-6 py-6 text-center text-zinc-700">No activity yet</td></tr>
+                    <tr><td colSpan={7} className="px-6 py-6 text-center text-zinc-700">No activity yet</td></tr>
                   )}
                 </tbody>
               </table>

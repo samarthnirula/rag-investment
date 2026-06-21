@@ -6,10 +6,14 @@ import { demoAuth, setDemoToken, getDemoToken } from "@/lib/demo-api";
 
 export default function DemoEntryPage() {
   const router = useRouter();
-  const [code, setCode]       = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError]     = useState("");
-  const [shake, setShake]     = useState(false);
+  const [code, setCode]         = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName]   = useState("");
+  const [email, setEmail]         = useState("");
+  const [phone, setPhone]         = useState("");
+  const [loading, setLoading]   = useState(false);
+  const [error, setError]       = useState("");
+  const [shake, setShake]       = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -20,11 +24,20 @@ export default function DemoEntryPage() {
     e.preventDefault();
     const trimmed = code.trim().toUpperCase();
     if (!trimmed || loading) return;
+    if (!firstName.trim() || !lastName.trim() || !email.trim()) {
+      setError("Please enter your name and email so we know who's testing the demo.");
+      return;
+    }
 
     setLoading(true);
     setError("");
     try {
-      const result = await demoAuth(trimmed);
+      const result = await demoAuth(trimmed, {
+        first_name: firstName.trim(),
+        last_name: lastName.trim(),
+        email: email.trim(),
+        phone: phone.trim() || undefined,
+      });
       setDemoToken(result.token);
       router.push("/demo/chat");
     } catch (err) {
@@ -58,13 +71,51 @@ export default function DemoEntryPage() {
           <h1 className="text-base font-semibold text-zinc-200 mb-1">Enter your access code</h1>
           <p className="text-xs text-zinc-600 mb-6">Epstein Case Demo — provided by Atticus</p>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <input
+                type="text"
+                value={firstName}
+                onChange={(e) => setFirstName(e.target.value)}
+                placeholder="First name"
+                autoComplete="given-name"
+                disabled={loading}
+                className="w-full bg-white/[0.05] border border-white/[0.1] rounded-xl px-3.5 py-2.5 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/20 disabled:opacity-50 transition-colors"
+              />
+              <input
+                type="text"
+                value={lastName}
+                onChange={(e) => setLastName(e.target.value)}
+                placeholder="Last name"
+                autoComplete="family-name"
+                disabled={loading}
+                className="w-full bg-white/[0.05] border border-white/[0.1] rounded-xl px-3.5 py-2.5 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/20 disabled:opacity-50 transition-colors"
+              />
+            </div>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="Email"
+              autoComplete="email"
+              disabled={loading}
+              className="w-full bg-white/[0.05] border border-white/[0.1] rounded-xl px-3.5 py-2.5 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/20 disabled:opacity-50 transition-colors"
+            />
+            <input
+              type="tel"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              placeholder="Phone (optional)"
+              autoComplete="tel"
+              disabled={loading}
+              className="w-full bg-white/[0.05] border border-white/[0.1] rounded-xl px-3.5 py-2.5 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/20 disabled:opacity-50 transition-colors"
+            />
             <input
               ref={inputRef}
               type="text"
               value={code}
               onChange={(e) => setCode(e.target.value.toUpperCase())}
-              placeholder="XXXXXX"
+              placeholder="ACCESS CODE"
               maxLength={12}
               autoComplete="off"
               spellCheck={false}

@@ -144,6 +144,14 @@ def _check_demo_rate(user_slug: str) -> None:
 # ── Pydantic models ───────────────────────────────────────────────────────────
 class AuthRequest(BaseModel):
     access_code: str
+    # Contact info collected at redemption time so we know who's actually
+    # behind a demo session (instead of just an anonymous user1/user2/user3
+    # slug). Optional so existing/old clients that don't send these fields
+    # don't break — see auth_demo() for how missing fields are handled.
+    first_name: str | None = None
+    last_name: str | None = None
+    email: str | None = None
+    phone: str | None = None
 
 
 class DemoQueryRequest(BaseModel):
@@ -989,6 +997,16 @@ def seed_demo_users(cfg: Any) -> None:
                     last_active TIMESTAMPTZ,
                     query_count INT DEFAULT 0
                 );
+                -- Contact info captured when the lawyer redeems their access
+                -- code, so the admin dashboard can show who's actually behind
+                -- each demo session instead of just an anonymous slug.
+                -- ADD COLUMN IF NOT EXISTS keeps this safe to re-run on every
+                -- startup against an existing database that predates these columns.
+                ALTER TABLE demo.sessions ADD COLUMN IF NOT EXISTS first_name TEXT;
+                ALTER TABLE demo.sessions ADD COLUMN IF NOT EXISTS last_name TEXT;
+                ALTER TABLE demo.sessions ADD COLUMN IF NOT EXISTS email TEXT;
+                ALTER TABLE demo.sessions ADD COLUMN IF NOT EXISTS phone TEXT;
+                ALTER TABLE demo.sessions ADD COLUMN IF NOT EXISTS info_submitted_at TIMESTAMPTZ;
                 CREATE TABLE IF NOT EXISTS demo.usage (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     user_slug TEXT NOT NULL,
@@ -1057,6 +1075,36 @@ def auth_demo(req: AuthRequest):
     for user_slug, stored_hash in rows:
         try:
             if bcrypt.checkpw(raw_code.encode(), stored_hash.encode()):
+                # Save whatever contact info was provided at redemption.
+                # COALESCE keeps any previously-saved value if this particular
+                # login didn't resend it (e.g. an old cached frontend build,
+                # or a field left blank) — so a later login can't blank out
+                # info captured on an earlier one.
+                first_name = (req.first_name or "").strip() or None
+                last_name = (req.last_name or "").strip() or None
+                email = (req.email or "").strip() or None
+                phone = (req.phone or "").strip() or None
+                if any([first_name, last_name, email, phone]):
+                    try:
+                        with open_connection(cfg.db) as conn2:
+                            cur2 = conn2.cursor()
+                            cur2.execute(
+                                """UPDATE demo.sessions
+                                   SET first_name = COALESCE(%s, first_name),
+                                       last_name  = COALESCE(%s, last_name),
+                                       email      = COALESCE(%s, email),
+                                       phone      = COALESCE(%s, phone),
+                                       info_submitted_at = NOW()
+                                   WHERE user_slug = %s""",
+                                (first_name, last_name, email, phone, user_slug),
+                            )
+                            conn2.commit()
+                            cur2.close()
+                    except Exception:
+                        # Never block login on a failure to save contact info —
+                        # the demo session itself is more important than the
+                        # CRM-style bookkeeping.
+                        logger.warning("auth_demo: failed to save contact info for %s", user_slug, exc_info=True)
                 token = _sign_token(user_slug)
                 return {"user_slug": user_slug, "token": token, "ok": True}
         except Exception:
@@ -1521,10 +1569,16 @@ def admin_costs(x_admin_key: str | None = Header(None, alias="x-admin-key")):
                 """SELECT s.user_slug,
                           s.query_count,
                           COALESCE(SUM(u.cost_usd), 0) AS cost_usd,
-                          s.last_active
+                          s.last_active,
+                          s.first_name,
+                          s.last_name,
+                          s.email,
+                          s.phone,
+                          s.info_submitted_at
                    FROM demo.sessions s
                    LEFT JOIN demo.usage u ON s.user_slug = u.user_slug
-                   GROUP BY s.user_slug, s.query_count, s.last_active
+                   GROUP BY s.user_slug, s.query_count, s.last_active,
+                            s.first_name, s.last_name, s.email, s.phone, s.info_submitted_at
                    ORDER BY s.user_slug"""
             )
             by_user = [
@@ -1533,6 +1587,11 @@ def admin_costs(x_admin_key: str | None = Header(None, alias="x-admin-key")):
                     "query_count": r[1] or 0,
                     "cost_usd": round(float(r[2]), 6),
                     "last_active": r[3].isoformat() if r[3] else None,
+                    "first_name": r[4],
+                    "last_name": r[5],
+                    "email": r[6],
+                    "phone": r[7],
+                    "info_submitted_at": r[8].isoformat() if r[8] else None,
                 }
                 for r in cur.fetchall()
             ]

@@ -45,10 +45,20 @@ async function demoRequest<T>(path: string, opts: RequestInit = {}): Promise<T> 
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
-export async function demoAuth(accessCode: string): Promise<{ user_slug: string; token: string; ok: boolean }> {
+export interface DemoContactInfo {
+  first_name?: string;
+  last_name?: string;
+  email?: string;
+  phone?: string;
+}
+
+export async function demoAuth(
+  accessCode: string,
+  contact?: DemoContactInfo
+): Promise<{ user_slug: string; token: string; ok: boolean }> {
   return demoRequest("/api/demo/auth", {
     method: "POST",
-    body: JSON.stringify({ access_code: accessCode }),
+    body: JSON.stringify({ access_code: accessCode, ...contact }),
   });
 }
 
@@ -195,7 +205,17 @@ export async function demoOverview(): Promise<DemoOverview> {
 export interface AdminCosts {
   total_cost_usd: number;
   total_queries: number;
-  by_user: Array<{ user_slug: string; query_count: number; cost_usd: number; last_active: string | null }>;
+  by_user: Array<{
+    user_slug: string;
+    query_count: number;
+    cost_usd: number;
+    last_active: string | null;
+    first_name: string | null;
+    last_name: string | null;
+    email: string | null;
+    phone: string | null;
+    info_submitted_at: string | null;
+  }>;
   by_model: Array<{ model: string; input_tokens: number; output_tokens: number; cost_usd: number }>;
   recent_queries: Array<{ user_slug: string; timestamp: string | null; question: string; cost_usd: number }>;
 }

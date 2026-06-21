@@ -1150,6 +1150,16 @@ def create_app() -> FastAPI:
     except ConfigError as exc:
         logger.error("Config error at startup: %s", exc)
         _cfg = _embedder = _llm = _reranker = _zep = None  # type: ignore[assignment]
+    except Exception as exc:
+        # Previously only ConfigError was caught here — any other startup
+        # failure (e.g. EmbeddingError from Embedder, a bad ANTHROPIC_API_KEY,
+        # Reranker/ZepMemory init failure) propagated out of create_app(),
+        # which would crash the whole ASGI app at import time with no useful
+        # log line distinguishing it from any other boot failure. Widened to
+        # log the real exception and degrade gracefully instead, same as the
+        # ConfigError path, so `_cfg is None` always has a traceback explaining why.
+        logger.error("Unexpected error bootstrapping services at startup: %s", exc, exc_info=True)
+        _cfg = _embedder = _llm = _reranker = _zep = None  # type: ignore[assignment]
 
     def require_active_subscription(user: dict = Depends(current_user)) -> dict:
         """Block queries / uploads once the trial period expires."""
@@ -2484,7 +2494,18 @@ def create_app() -> FastAPI:
         try:
             seed_demo_users(_cfg)
         except Exception as _seed_exc:
-            logger.warning("seed_demo_users failed at startup: %s", _seed_exc)
+            logger.warning("seed_demo_users failed at startup: %s", _seed_exc, exc_info=True)
+    else:
+        # Previously silent: if service bootstrap failed above, _cfg is None
+        # and seed_demo_users is never even called — meaning demo access
+        # codes never get hashed into demo.sessions, with zero log evidence
+        # of why. Now it's explicit, and points back to the bootstrap error
+        # logged above.
+        logger.warning(
+            "seed_demo_users skipped at startup because service config failed to "
+            "load (_cfg is None) — see the 'Config error at startup' / "
+            "'Unexpected error bootstrapping services' log line above for the cause."
+        )
 
     return app
 
