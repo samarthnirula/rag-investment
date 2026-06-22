@@ -76,6 +76,11 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        # NEXT_PUBLIC_* values are compiled into browser JavaScript at build
+        # time. The browser reaches the published host port, not Docker's
+        # internal `backend` DNS name.
+        NEXT_PUBLIC_API_URL: http://localhost:8000
     command: next start -p 3000
     ports:
       # Bind to loopback only — nginx is the sole external entry point.
@@ -83,8 +88,7 @@ services:
     env_file:
       - .env
     environment:
-      # Internal API URL used by server-side Next.js routes
-      - NEXT_PUBLIC_API_URL=http://backend:8000
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
       # Firebase client keys — sourced from .env file above
       - NEXT_PUBLIC_FIREBASE_API_KEY=${FIREBASE_API_KEY}
       - NEXT_PUBLIC_FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}

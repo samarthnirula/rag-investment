@@ -4,11 +4,62 @@ from __future__ import annotations
 import logging
 import random
 import time
+import uuid
 from pathlib import Path
 
 from insightlens.jobs.celery_app import celery_app
 
 _log = logging.getLogger(__name__)
+
+# How long to wait after an ingest before regenerating the case overview/
+# timeline. Bulk uploads enqueue one ingest_pdf_task per file with no signal
+# for "this was the last file in the batch" — so each successful ingest
+# schedules generation after this delay, and a Redis token lets a later
+# ingest cancel an earlier still-pending one. This collapses an N-file batch
+# into a single regeneration shortly after the last file finishes, instead
+# of N redundant Claude calls.
+_CASE_REGEN_DEBOUNCE_SECONDS = 30
+
+
+def _schedule_case_regeneration(case_id: str, user_id: str) -> None:
+    """Debounce overview+timeline regeneration across a burst of ingests."""
+    token = uuid.uuid4().hex
+    try:
+        import redis as _redis_mod
+        import os
+        rc = _redis_mod.Redis.from_url(
+            os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+            socket_connect_timeout=1, socket_timeout=1, decode_responses=True,
+        )
+        rc.set(f"case_regen_token:{case_id}", token, ex=_CASE_REGEN_DEBOUNCE_SECONDS + 60)
+    except Exception as exc:
+        _log.warning("Could not set debounce token for case %s, regenerating immediately: %s", case_id, exc)
+        token = None
+
+    generate_case_overview_task.apply_async(
+        args=[case_id, user_id, token], countdown=_CASE_REGEN_DEBOUNCE_SECONDS,
+    )
+    generate_case_timeline_task.apply_async(
+        args=[case_id, user_id, token], countdown=_CASE_REGEN_DEBOUNCE_SECONDS,
+    )
+
+
+def _is_latest_regen_token(case_id: str, token: str | None) -> bool:
+    """Return True if `token` is still the most recently scheduled one (or
+    debouncing is unavailable, in which case we fail open and proceed)."""
+    if token is None:
+        return True
+    try:
+        import redis as _redis_mod
+        import os
+        rc = _redis_mod.Redis.from_url(
+            os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+            socket_connect_timeout=1, socket_timeout=1, decode_responses=True,
+        )
+        current = rc.get(f"case_regen_token:{case_id}")
+        return current is None or current == token
+    except Exception:
+        return True
 
 
 @celery_app.task(
@@ -80,24 +131,15 @@ def ingest_pdf_task(
             job_id, filename, result.chunks_inserted,
         )
 
-        # After successful ingest, trigger AI summary generation if not yet done.
+        # After every successful ingest, (re)schedule overview/timeline
+        # generation so they stay current as documents are added to the
+        # case. Debounced so a multi-file bulk upload collapses into one
+        # regeneration shortly after the last file finishes.
         if case_id and user_id and result.chunks_inserted > 0:
             try:
-                with open_connection(cfg.db) as conn:
-                    cur = conn.cursor()
-                    cur.execute(
-                        "SELECT overview_generated, timeline_generated FROM cases WHERE case_id = %s",
-                        (case_id,),
-                    )
-                    row = cur.fetchone()
-                    cur.close()
-                if row:
-                    if not row[0]:
-                        generate_case_overview_task.delay(case_id, user_id)
-                    if not row[1]:
-                        generate_case_timeline_task.delay(case_id, user_id)
+                _schedule_case_regeneration(case_id, user_id)
             except Exception as exc:
-                _log.warning("ingest_pdf_task: could not queue AI tasks for case %s: %s", case_id, exc)
+                _log.warning("ingest_pdf_task: could not schedule AI tasks for case %s: %s", case_id, exc)
 
         return {"job_id": job_id, "chunks_inserted": result.chunks_inserted}
 
@@ -126,7 +168,7 @@ def ingest_pdf_task(
     default_retry_delay=30,
     queue="ingest",
 )
-def generate_case_overview_task(self, case_id: str, user_id: str) -> dict:
+def generate_case_overview_task(self, case_id: str, user_id: str, _debounce_token: str | None = None) -> dict:
     """Generate an AI case overview (summary, parties, key issues) and store it."""
     import json
     import re
@@ -134,6 +176,9 @@ def generate_case_overview_task(self, case_id: str, user_id: str) -> dict:
     from insightlens.generation.llm_client import ClaudeClient
     from insightlens.storage.chunk_repository import ChunkRepository
     from insightlens.storage.snowflake_client import open_connection
+
+    if not _is_latest_regen_token(case_id, _debounce_token):
+        return {"skipped": True, "reason": "superseded by a later ingest"}
 
     cfg = load_config()
     try:
@@ -216,7 +261,7 @@ def generate_case_overview_task(self, case_id: str, user_id: str) -> dict:
     default_retry_delay=30,
     queue="ingest",
 )
-def generate_case_timeline_task(self, case_id: str, user_id: str) -> dict:
+def generate_case_timeline_task(self, case_id: str, user_id: str, _debounce_token: str | None = None) -> dict:
     """Generate a chronological event timeline from case documents and store it."""
     import json
     import re
@@ -224,6 +269,9 @@ def generate_case_timeline_task(self, case_id: str, user_id: str) -> dict:
     from insightlens.generation.llm_client import ClaudeClient
     from insightlens.storage.chunk_repository import ChunkRepository
     from insightlens.storage.snowflake_client import open_connection
+
+    if not _is_latest_regen_token(case_id, _debounce_token):
+        return {"skipped": True, "reason": "superseded by a later ingest"}
 
     cfg = load_config()
     try:

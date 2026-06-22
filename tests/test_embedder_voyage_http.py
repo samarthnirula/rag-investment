@@ -8,6 +8,7 @@ from insightlens.embeddings.embedder import Embedder
 def test_voyage_embeddings_use_lightweight_http_api(monkeypatch):
     monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
     response = Mock()
+    response.status_code = 200
     response.raise_for_status.return_value = None
     response.json.return_value = {
         "data": [

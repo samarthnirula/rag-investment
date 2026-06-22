@@ -13,6 +13,11 @@ const ScalesOfJustice = dynamic(
   { ssr: false }
 );
 
+const CaseGraph = dynamic(
+  () => import("@/components/CaseGraph").then((m) => m.CaseGraph),
+  { ssr: false }
+);
+
 function LandingPageInner() {
   const router = useRouter();
   const { user, loading } = useAuth();
@@ -220,6 +225,23 @@ function LandingPageInner() {
               </div>
             ))}
           </div>
+        </div>
+      </section>
+
+      {/* ── CASE GRAPH ──────────────────────────────────────── */}
+      <section className="bg-navy-900 px-12 py-20">
+        <div className="max-w-4xl mx-auto">
+          <div className="text-center mb-10">
+            <p className="text-xs font-bold text-gold-500 tracking-[.1em] mb-3">SEE IT IN ACTION</p>
+            <h2 className="text-3xl font-extrabold text-white tracking-tight leading-tight">
+              How Atticus maps a case.
+            </h2>
+            <p className="text-xs text-zinc-500 mt-3 max-w-xl mx-auto">
+              A live view of the public-record demo case structure — parties, key issues, and document
+              categories. No user data, queries, or private documents are ever shown here.
+            </p>
+          </div>
+          <CaseGraph />
         </div>
       </section>
 

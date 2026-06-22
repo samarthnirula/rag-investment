@@ -40,6 +40,11 @@ async function withTimeout<T>(
     if (err instanceof DOMException && err.name === "AbortError") {
       throw new Error("Request timed out while waiting for the Atticus backend.");
     }
+    if (err instanceof TypeError) {
+      throw new Error(
+        "Could not reach the Atticus backend. Start the backend and verify NEXT_PUBLIC_API_URL.",
+      );
+    }
     throw err;
   } finally {
     window.clearTimeout(timeout);
@@ -242,10 +247,12 @@ export interface DemoTimeline {
   events: DemoTimelineEvent[];
   generated_at?: string | null;
   note?: string;
+  estimated_seconds?: number;
 }
 
-export async function demoTimeline(): Promise<DemoTimeline> {
-  return demoRequest("/api/demo/timeline");
+export async function demoTimeline(caseId?: string | null): Promise<DemoTimeline> {
+  const query = caseId ? `?case_id=${encodeURIComponent(caseId)}` : "";
+  return demoRequest(`/api/demo/timeline${query}`);
 }
 
 export interface DemoOverview {
@@ -257,10 +264,38 @@ export interface DemoOverview {
   matter_type?: string | null;
   generated_at?: string | null;
   note?: string;
+  estimated_seconds?: number;
 }
 
-export async function demoOverview(): Promise<DemoOverview> {
-  return demoRequest("/api/demo/overview");
+export async function demoOverview(caseId?: string | null): Promise<DemoOverview> {
+  const query = caseId ? `?case_id=${encodeURIComponent(caseId)}` : "";
+  return demoRequest(`/api/demo/overview${query}`);
+}
+
+// ── Case graph (public, no auth required) ─────────────────────────────────────
+
+export interface CaseGraphNode {
+  id: string;
+  label: string;
+  group: "case" | "party" | "issue" | "doc_type";
+  value: number;
+}
+
+export interface CaseGraphLink {
+  source: string;
+  target: string;
+}
+
+export interface CaseGraphData {
+  pending: boolean;
+  nodes: CaseGraphNode[];
+  links: CaseGraphLink[];
+  generated_at?: string | null;
+  note?: string;
+}
+
+export async function demoCaseGraph(): Promise<CaseGraphData> {
+  return demoRequest("/api/demo/case-graph");
 }
 
 // ── Admin ─────────────────────────────────────────────────────────────────────

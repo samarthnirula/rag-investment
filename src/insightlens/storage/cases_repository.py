@@ -91,12 +91,48 @@ class CasesRepository:
             cur.close()
 
     def delete_case(self, case_id: str) -> None:
+        """Permanently delete a case and everything tied to it: documents,
+        chunks, images, the AI-generated overview/timeline/insights, and
+        chat history. Documents are only removed if this case is their last
+        link — a document shared across multiple cases stays intact."""
         cur = self._conn.cursor()
         try:
+            cur.execute(
+                "SELECT document_id FROM case_documents WHERE case_id=%s",
+                (case_id,),
+            )
+            document_ids = [r[0] for r in cur.fetchall()]
+
             cur.execute("DELETE FROM case_documents WHERE case_id=%s", (case_id,))
+
+            for document_id in document_ids:
+                cur.execute(
+                    "SELECT 1 FROM case_documents WHERE document_id=%s LIMIT 1",
+                    (document_id,),
+                )
+                if cur.fetchone():
+                    continue  # still linked to another case — keep it
+                cur.execute("DELETE FROM images WHERE document_id=%s", (document_id,))
+                cur.execute("DELETE FROM case_insights WHERE document_id=%s", (document_id,))
+                cur.execute("DELETE FROM upload_events WHERE document_id=%s", (document_id,))
+                cur.execute("DELETE FROM chunks WHERE document_id=%s", (document_id,))
+                cur.execute("DELETE FROM documents WHERE document_id=%s", (document_id,))
+
+            cur.execute(
+                """DELETE FROM chat_messages WHERE chat_id IN (
+                       SELECT chat_id FROM chats WHERE case_id=%s
+                   )""",
+                (case_id,),
+            )
+            cur.execute("DELETE FROM chats WHERE case_id=%s", (case_id,))
+            cur.execute("DELETE FROM case_overviews WHERE case_id=%s", (case_id,))
+            cur.execute("DELETE FROM case_timelines WHERE case_id=%s", (case_id,))
+            cur.execute("DELETE FROM case_insights WHERE case_id=%s", (case_id,))
+            cur.execute("DELETE FROM generated_artifacts WHERE case_id=%s", (case_id,))
             cur.execute("DELETE FROM cases WHERE case_id=%s", (case_id,))
         except psycopg2.Error:
-            pass
+            self._conn.rollback()
+            raise
         finally:
             cur.close()
 
@@ -166,7 +202,9 @@ class CasesRepository:
             case_ids = [r[0] for r in cur.fetchall()]
             if case_ids:
                 ph = ",".join(["%s"] * len(case_ids))
-                cur.execute(f"DELETE FROM case_documents WHERE case_id IN ({ph})", tuple(case_ids))
+                # nosec B608: ph is only ever "%s,%s,...", a parameter-count
+                # placeholder string; actual values are bound via tuple(case_ids).
+                cur.execute(f"DELETE FROM case_documents WHERE case_id IN ({ph})", tuple(case_ids))  # nosec B608
             cur.execute("DELETE FROM cases WHERE user_id=%s", (user_id,))
             return len(case_ids)
         except psycopg2.Error:

@@ -47,6 +47,12 @@ const folderPickerAttrs = {
 } as InputHTMLAttributes<HTMLInputElement>;
 
 const ACTIVE_CASE_KEY_PREFIX = "atticus_demo_active_case:";
+const CASES_CACHE_KEY_PREFIX = "atticus_demo_cases:";
+const CHAT_CACHE_KEY_PREFIX = "atticus_demo_chat:";
+const INTELLIGENCE_CACHE_KEY_PREFIX = "atticus_demo_intelligence:";
+const MAX_CACHED_MESSAGES = 100;
+const CASES_CACHE_TTL_MS = 5 * 60 * 1000;
+const SHARED_INTELLIGENCE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 function isSupportedCaseFile(file: File) {
   return /\.(pdf|pptx)$/i.test(file.name);
@@ -75,6 +81,103 @@ type DataTransferItemWithEntry = DataTransferItem & {
 
 function activeCaseStorageKey(userSlug: string) {
   return `${ACTIVE_CASE_KEY_PREFIX}${userSlug}`;
+}
+
+function casesStorageKey(userSlug: string) {
+  return `${CASES_CACHE_KEY_PREFIX}${userSlug}`;
+}
+
+function chatStorageKey(userSlug: string, caseId: string | null) {
+  return `${CHAT_CACHE_KEY_PREFIX}${userSlug}:${caseId || "epstein"}`;
+}
+
+function readCachedCases(userSlug: string): DemoCase[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(casesStorageKey(userSlug)) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeCachedCases(userSlug: string, demoCases: DemoCase[]) {
+  try {
+    localStorage.setItem(casesStorageKey(userSlug), JSON.stringify(demoCases));
+    localStorage.setItem(`${casesStorageKey(userSlug)}:cached_at`, String(Date.now()));
+  } catch {
+    // Storage may be unavailable or full; the live API remains the fallback.
+  }
+}
+
+function hasFreshCasesCache(userSlug: string) {
+  const cachedAt = Number(localStorage.getItem(`${casesStorageKey(userSlug)}:cached_at`) || 0);
+  return cachedAt > 0 && Date.now() - cachedAt < CASES_CACHE_TTL_MS;
+}
+
+function readCachedMessages(userSlug: string, caseId: string | null): ChatMessage[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(chatStorageKey(userSlug, caseId)) || "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (message): message is ChatMessage =>
+        message != null &&
+        (message.role === "user" || message.role === "assistant") &&
+        typeof message.content === "string",
+    ).slice(-MAX_CACHED_MESSAGES);
+  } catch {
+    return [];
+  }
+}
+
+function writeCachedMessages(userSlug: string, caseId: string | null, chatMessages: ChatMessage[]) {
+  try {
+    localStorage.setItem(
+      chatStorageKey(userSlug, caseId),
+      JSON.stringify(chatMessages.slice(-MAX_CACHED_MESSAGES)),
+    );
+  } catch {
+    // Avoid breaking chat if browser storage is unavailable or full.
+  }
+}
+
+function intelligenceStorageKey(
+  userSlug: string,
+  caseId: string | null,
+  kind: "timeline" | "overview",
+) {
+  return `${INTELLIGENCE_CACHE_KEY_PREFIX}${userSlug}:${caseId || "epstein"}:${kind}`;
+}
+
+function readCachedIntelligence<T>(
+  userSlug: string,
+  caseId: string | null,
+  kind: "timeline" | "overview",
+): T | null {
+  try {
+    const raw = localStorage.getItem(intelligenceStorageKey(userSlug, caseId, kind));
+    if (!raw) return null;
+    const cached = JSON.parse(raw) as { value: T; cachedAt: number };
+    const ttl = caseId ? Number.POSITIVE_INFINITY : SHARED_INTELLIGENCE_CACHE_TTL_MS;
+    return Date.now() - cached.cachedAt <= ttl ? cached.value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedIntelligence<T>(
+  userSlug: string,
+  caseId: string | null,
+  kind: "timeline" | "overview",
+  value: T,
+) {
+  try {
+    localStorage.setItem(
+      intelligenceStorageKey(userSlug, caseId, kind),
+      JSON.stringify({ value, cachedAt: Date.now() }),
+    );
+  } catch {
+    // Live API remains available when browser storage is unavailable.
+  }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -136,6 +239,11 @@ function TimelineView({ data }: { data: DemoTimeline | null; loading: boolean })
       <div className="text-center text-zinc-500 text-sm">
         <div className="text-2xl mb-3">⏳</div>
         Timeline is being generated — check back shortly.
+        {data.estimated_seconds && (
+          <p className="mt-2 text-xs text-indigo-300">
+            Estimated time: about {data.estimated_seconds} seconds
+          </p>
+        )}
         {data.note && <p className="text-xs text-zinc-600 mt-2">{data.note}</p>}
       </div>
     </div>
@@ -231,6 +339,11 @@ function OverviewView({ data }: { data: DemoOverview | null; loading: boolean })
       <div className="text-center text-zinc-500 text-sm">
         <div className="text-2xl mb-3">⏳</div>
         Overview is being generated — check back shortly.
+        {data.estimated_seconds && (
+          <p className="mt-2 text-xs text-indigo-300">
+            Estimated time: about {data.estimated_seconds} seconds
+          </p>
+        )}
         {data.note && <p className="text-xs text-zinc-600 mt-2">{data.note}</p>}
       </div>
     </div>
@@ -326,8 +439,17 @@ export default function DemoChatPage() {
   const caseFolderRef = useRef<HTMLInputElement>(null);
   const casePdfRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesCacheKeyRef = useRef<string | null>(null);
   const { active: achievementToasts, unlock } = useAchievements();
   const visitedTabsRef = useRef<Set<Tab>>(new Set(["chat"]));
+
+  const activateCase = useCallback((caseId: string | null, slug: string) => {
+    setActiveCaseId(caseId);
+    localStorage.setItem(activeCaseStorageKey(slug), caseId || "epstein");
+    messagesCacheKeyRef.current = chatStorageKey(slug, caseId);
+    setMessages(readCachedMessages(slug, caseId));
+    setInput("");
+  }, []);
 
   // Auth guard
   useEffect(() => {
@@ -336,29 +458,77 @@ export default function DemoChatPage() {
     if (cachedSlug) {
       setUserSlug(cachedSlug);
       setUnlimited(cachedSlug === "user3");
+      const cachedCases = readCachedCases(cachedSlug);
+      setCases(cachedCases);
+      const storedCaseId = localStorage.getItem(activeCaseStorageKey(cachedSlug));
+      const cachedCaseId =
+        storedCaseId && storedCaseId !== "epstein" &&
+        cachedCases.some((demoCase) => demoCase.case_id === storedCaseId)
+          ? storedCaseId
+          : null;
+      activateCase(cachedCaseId, cachedSlug);
     }
     demoMe()
       .then(async (me) => {
         setUserSlug(me.user_slug);
         setQueryCount(me.query_count);
         setUnlimited(Boolean(me.unlimited));
-        const loadedCases = await demoCases().catch(() => []);
-        setCases(loadedCases);
+        const locallyCachedCases = readCachedCases(me.user_slug);
+        if (locallyCachedCases.length > 0) setCases(locallyCachedCases);
         const cachedCaseId = localStorage.getItem(activeCaseStorageKey(me.user_slug));
         if (cachedCaseId === "epstein") {
-          setActiveCaseId(null);
-        } else if (cachedCaseId && loadedCases.some((demoCase) => demoCase.case_id === cachedCaseId)) {
-          setActiveCaseId(cachedCaseId);
-        } else if (loadedCases.length === 1) {
-          setActiveCaseId(loadedCases[0].case_id);
-          localStorage.setItem(activeCaseStorageKey(me.user_slug), loadedCases[0].case_id);
+          activateCase(null, me.user_slug);
+        } else if (
+          cachedCaseId &&
+          locallyCachedCases.some((demoCase) => demoCase.case_id === cachedCaseId)
+        ) {
+          activateCase(cachedCaseId, me.user_slug);
+        } else if (locallyCachedCases.length === 1) {
+          activateCase(locallyCachedCases[0].case_id, me.user_slug);
+        }
+
+        // Reconcile quietly after rendering cached state, but not on every
+        // refresh. Uploads update this cache immediately; the API refreshes it
+        // at most once every five minutes.
+        const loadedCases = hasFreshCasesCache(me.user_slug)
+          ? null
+          : await demoCases().catch(() => null);
+        if (loadedCases) {
+          setCases(loadedCases);
+          writeCachedCases(me.user_slug, loadedCases);
+          const selected = localStorage.getItem(activeCaseStorageKey(me.user_slug));
+          if (
+            selected &&
+            selected !== "epstein" &&
+            loadedCases.some((demoCase) => demoCase.case_id === selected)
+          ) {
+            activateCase(selected, me.user_slug);
+          } else if (
+            selected !== "epstein" &&
+            selected &&
+            !loadedCases.some((demoCase) => demoCase.case_id === selected)
+          ) {
+            const fallbackCaseId = loadedCases.length === 1 ? loadedCases[0].case_id : null;
+            activateCase(fallbackCaseId, me.user_slug);
+          } else if (!selected && loadedCases.length === 1) {
+            activateCase(loadedCases[0].case_id, me.user_slug);
+          }
         }
       })
       .catch(() => {
         // Never discard intake completion automatically. The cached session is
         // cleared only by explicit sign-out or browser storage controls.
       });
-  }, [router]);
+  }, [activateCase, router]);
+
+  // Persist each case's conversation locally as it changes. The ref prevents
+  // messages from one case being written under another case during a switch.
+  useEffect(() => {
+    if (!userSlug) return;
+    const expectedKey = chatStorageKey(userSlug, activeCaseId);
+    if (messagesCacheKeyRef.current !== expectedKey) return;
+    writeCachedMessages(userSlug, activeCaseId, messages);
+  }, [activeCaseId, messages, userSlug]);
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -368,19 +538,76 @@ export default function DemoChatPage() {
   // Lazy-load timeline / overview when tab activated
   const loadTimeline = useCallback(async () => {
     if (timeline || tlLoading) return;
+    if (userSlug) {
+      const cached = readCachedIntelligence<DemoTimeline>(
+        userSlug,
+        activeCaseId,
+        "timeline",
+      );
+      if (cached && !cached.pending) {
+        setTimeline(cached);
+        return;
+      }
+    }
     setTlLoading(true);
-    try { setTimeline(await demoTimeline()); }
-    catch { setTimeline({ pending: true, events: [], note: "Failed to load timeline." }); }
+    try {
+      const result = await demoTimeline(activeCaseId);
+      setTimeline(result);
+      if (userSlug && !result.pending) {
+        writeCachedIntelligence(userSlug, activeCaseId, "timeline", result);
+      }
+    }
+    catch (err) {
+      setTimeline({
+        pending: true,
+        events: [],
+        note: err instanceof Error ? err.message : "Failed to load timeline.",
+      });
+    }
     finally { setTlLoading(false); }
-  }, [timeline, tlLoading]);
+  }, [activeCaseId, timeline, tlLoading, userSlug]);
 
   const loadOverview = useCallback(async () => {
     if (overview || ovLoading) return;
+    if (userSlug) {
+      const cached = readCachedIntelligence<DemoOverview>(
+        userSlug,
+        activeCaseId,
+        "overview",
+      );
+      if (cached && !cached.pending) {
+        setOverview(cached);
+        return;
+      }
+    }
     setOvLoading(true);
-    try { setOverview(await demoOverview()); }
-    catch { setOverview({ pending: true, summary: "", parties: [], key_issues: [], note: "Failed to load overview." }); }
+    try {
+      const result = await demoOverview(activeCaseId);
+      setOverview(result);
+      if (userSlug && !result.pending) {
+        writeCachedIntelligence(userSlug, activeCaseId, "overview", result);
+      }
+    }
+    catch (err) {
+      setOverview({
+        pending: true,
+        summary: "",
+        parties: [],
+        key_issues: [],
+        note: err instanceof Error ? err.message : "Failed to load overview.",
+      });
+    }
     finally { setOvLoading(false); }
-  }, [overview, ovLoading]);
+  }, [activeCaseId, overview, ovLoading, userSlug]);
+
+  // Timeline and overview belong to the selected case. Never carry cached
+  // Epstein data (or another uploaded case's data) across a case switch.
+  useEffect(() => {
+    setTimeline(null);
+    setOverview(null);
+    setTlLoading(false);
+    setOvLoading(false);
+  }, [activeCaseId]);
 
   // Also load from tab state so rapid clicks during initial auth/render cannot
   // leave a selected tab with no request in flight.
@@ -388,6 +615,30 @@ export default function DemoChatPage() {
     if (activeTab === "timeline") void loadTimeline();
     if (activeTab === "overview") void loadOverview();
   }, [activeTab, loadTimeline, loadOverview]);
+
+  // Uploaded-case intelligence may be generated asynchronously. Poll only
+  // while a case-specific result is pending; shared Epstein data is static.
+  useEffect(() => {
+    if (
+      !activeCaseId ||
+      activeTab !== "timeline" ||
+      !timeline?.pending ||
+      !timeline.estimated_seconds
+    ) return;
+    const timer = window.setTimeout(() => setTimeline(null), 5000);
+    return () => window.clearTimeout(timer);
+  }, [activeCaseId, activeTab, timeline]);
+
+  useEffect(() => {
+    if (
+      !activeCaseId ||
+      activeTab !== "overview" ||
+      !overview?.pending ||
+      !overview.estimated_seconds
+    ) return;
+    const timer = window.setTimeout(() => setOverview(null), 5000);
+    return () => window.clearTimeout(timer);
+  }, [activeCaseId, activeTab, overview]);
 
   function switchTab(tab: Tab) {
     setActiveTab(tab);
@@ -403,6 +654,7 @@ export default function DemoChatPage() {
     setActiveTab("chat");
     setMessages([]);
     setInput("");
+    if (userSlug) writeCachedMessages(userSlug, activeCaseId, []);
   }
 
   function applyCaseFiles(files: File[]) {
@@ -475,9 +727,19 @@ export default function DemoChatPage() {
       const result = await demoUploadCase(caseFiles, name);
       const nextCases = await demoCases();
       setCases(nextCases);
-      setActiveCaseId(result.case_id);
-      if (userSlug) localStorage.setItem(activeCaseStorageKey(userSlug), result.case_id);
-      setMessages([]);
+      if (userSlug) {
+        writeCachedCases(userSlug, nextCases);
+        localStorage.removeItem(
+          intelligenceStorageKey(userSlug, result.case_id, "timeline"),
+        );
+        localStorage.removeItem(
+          intelligenceStorageKey(userSlug, result.case_id, "overview"),
+        );
+        activateCase(result.case_id, userSlug);
+      } else {
+        setActiveCaseId(result.case_id);
+        setMessages([]);
+      }
       setInput("");
       setActiveTab("chat");
       setShowCaseModal(false);
@@ -594,9 +856,7 @@ export default function DemoChatPage() {
           <button
             type="button"
             onClick={() => {
-              setActiveCaseId(null);
-              if (userSlug) localStorage.setItem(activeCaseStorageKey(userSlug), "epstein");
-              setMessages([]);
+              if (userSlug) activateCase(null, userSlug);
               setActiveTab("chat");
             }}
             className={`mb-1 flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs transition-colors ${
@@ -613,9 +873,7 @@ export default function DemoChatPage() {
               key={demoCase.case_id}
               type="button"
               onClick={() => {
-                setActiveCaseId(demoCase.case_id);
-                if (userSlug) localStorage.setItem(activeCaseStorageKey(userSlug), demoCase.case_id);
-                setMessages([]);
+                if (userSlug) activateCase(demoCase.case_id, userSlug);
                 setActiveTab("chat");
               }}
               className={`mb-1 flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-xs transition-colors ${
@@ -950,7 +1208,9 @@ export default function DemoChatPage() {
                 disabled={caseUploading || caseFiles.length === 0}
                 className="w-full rounded-lg bg-indigo-600 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                {caseUploading ? "Uploading and indexing..." : "Upload case"}
+                {caseUploading
+                  ? "Processing case… usually 15–60 seconds"
+                  : "Upload case"}
               </button>
             </div>
           </div>

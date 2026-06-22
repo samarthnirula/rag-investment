@@ -1496,33 +1496,58 @@ def demo_query(req: DemoQueryRequest, user_slug: str = Depends(_get_demo_user)):
 
 # ── GET /api/demo/timeline ────────────────────────────────────────────────────
 @router.get("/timeline")
-def demo_timeline(user_slug: str = Depends(_get_demo_user)):
+def demo_timeline(
+    case_id: str | None = None,
+    user_slug: str = Depends(_get_demo_user),
+):
     from insightlens.config import load_config
     from insightlens.storage.snowflake_client import open_connection
     cfg = load_config()
     try:
         with open_connection(cfg.db) as conn:
+            if case_id:
+                _assert_demo_case_owned(conn, case_id, user_slug)
             cur = conn.cursor()
             try:
-                cur.execute(
-                    """SELECT ct.events, ct.generated_at
-                       FROM case_timelines ct
-                       JOIN cases c ON ct.case_id = c.case_id
-                       WHERE COALESCE(c.is_demo, FALSE) = TRUE OR c.user_id IS NULL
-                       ORDER BY COALESCE(c.is_demo, FALSE) DESC, ct.generated_at DESC
-                       LIMIT 1"""
-                )
+                if case_id:
+                    cur.execute(
+                        """SELECT events, generated_at
+                           FROM case_timelines
+                           WHERE case_id = %s AND user_id = %s""",
+                        (case_id, _demo_user_id(user_slug)),
+                    )
+                else:
+                    cur.execute(
+                        """SELECT ct.events, ct.generated_at
+                           FROM case_timelines ct
+                           JOIN cases c ON ct.case_id = c.case_id
+                           WHERE COALESCE(c.is_demo, FALSE) = TRUE OR c.user_id IS NULL
+                           ORDER BY COALESCE(c.is_demo, FALSE) DESC, ct.generated_at DESC
+                           LIMIT 1"""
+                    )
                 row = cur.fetchone()
             finally:
                 cur.close()
 
+            if case_id and row is None:
+                return {
+                    "pending": True,
+                    "events": [],
+                    "generated_at": None,
+                    "estimated_seconds": 30,
+                    "note": "Timeline generation is still pending for this uploaded case.",
+                }
+
             events = row[0] if row and row[0] else _FALLBACK_TIMELINE_EVENTS
             # Image matching must happen while this connection is still borrowed.
             # Using it after the context exits races with other pool borrowers.
-            try:
-                events = _attach_timeline_images(conn, events)
-            except Exception:
-                logger.warning("demo_timeline: image enrichment failed", exc_info=True)
+            # Uploaded-case timelines should not receive images from the shared
+            # Epstein corpus.
+            if not case_id:
+                try:
+                    events = _attach_timeline_images(conn, events)
+                except Exception:
+                    logger.warning("demo_timeline: image enrichment failed", exc_info=True)
 
         if row is None:
             return {
@@ -1536,6 +1561,8 @@ def demo_timeline(user_slug: str = Depends(_get_demo_user)):
             "events": events,
             "generated_at": row[1].isoformat() if row[1] else None,
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("demo_timeline: %s", exc, exc_info=True)
         return {
@@ -1548,23 +1575,48 @@ def demo_timeline(user_slug: str = Depends(_get_demo_user)):
 
 # ── GET /api/demo/overview ────────────────────────────────────────────────────
 @router.get("/overview")
-def demo_overview(user_slug: str = Depends(_get_demo_user)):
+def demo_overview(
+    case_id: str | None = None,
+    user_slug: str = Depends(_get_demo_user),
+):
     from insightlens.config import load_config
     from insightlens.storage.snowflake_client import open_connection
     cfg = load_config()
     try:
         with open_connection(cfg.db) as conn:
+            if case_id:
+                _assert_demo_case_owned(conn, case_id, user_slug)
             cur = conn.cursor()
-            cur.execute(
-                """SELECT co.summary, co.parties, co.key_issues, co.jurisdiction, co.matter_type, co.generated_at
-                   FROM case_overviews co
-                   JOIN cases c ON co.case_id = c.case_id
-                   WHERE COALESCE(c.is_demo, FALSE) = TRUE OR c.user_id IS NULL
-                   ORDER BY COALESCE(c.is_demo, FALSE) DESC, co.generated_at DESC
-                   LIMIT 1"""
-            )
+            if case_id:
+                cur.execute(
+                    """SELECT summary, parties, key_issues, jurisdiction, matter_type, generated_at
+                       FROM case_overviews
+                       WHERE case_id = %s AND user_id = %s""",
+                    (case_id, _demo_user_id(user_slug)),
+                )
+            else:
+                cur.execute(
+                    """SELECT co.summary, co.parties, co.key_issues, co.jurisdiction, co.matter_type, co.generated_at
+                       FROM case_overviews co
+                       JOIN cases c ON co.case_id = c.case_id
+                       WHERE COALESCE(c.is_demo, FALSE) = TRUE OR c.user_id IS NULL
+                       ORDER BY COALESCE(c.is_demo, FALSE) DESC, co.generated_at DESC
+                       LIMIT 1"""
+                )
             row = cur.fetchone()
             cur.close()
+        if case_id and row is None:
+            return {
+                "pending": True,
+                "summary": "",
+                "parties": [],
+                "key_issues": [],
+                "jurisdiction": None,
+                "matter_type": None,
+                "generated_at": None,
+                "estimated_seconds": 30,
+                "note": "Overview generation is still pending for this uploaded case.",
+            }
         if row is None:
             return {
                 "pending": False,
@@ -1581,6 +1633,8 @@ def demo_overview(user_slug: str = Depends(_get_demo_user)):
             "matter_type": row[4] or _FALLBACK_OVERVIEW["matter_type"],
             "generated_at": row[5].isoformat() if row[5] else None,
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("demo_overview: %s", exc, exc_info=True)
         return {
@@ -1589,6 +1643,97 @@ def demo_overview(user_slug: str = Depends(_get_demo_user)):
             "generated_at": None,
             "note": "Using the shared demo overview.",
         }
+
+
+# ── GET /api/demo/case-graph ──────────────────────────────────────────────────
+# Public, unauthenticated: powers the landing-page visualization. Only reads
+# already-public-record case data (case_overviews, document type counts) that
+# is also shown post-login via /overview. Must never touch demo.sessions,
+# users, query_log, chats, or any other table containing user identifiers.
+@router.get("/case-graph")
+def demo_case_graph():
+    from insightlens.config import load_config
+    from insightlens.storage.snowflake_client import open_connection
+    cfg = load_config()
+
+    def _fallback() -> dict[str, Any]:
+        nodes: list[dict[str, Any]] = [
+            {"id": "case", "label": _FALLBACK_OVERVIEW["matter_type"], "group": "case", "value": 8},
+        ]
+        links: list[dict[str, Any]] = []
+        for party in _FALLBACK_OVERVIEW["parties"]:
+            node_id = f"party:{party['name']}"
+            nodes.append({"id": node_id, "label": party["name"], "group": "party", "value": 4})
+            links.append({"source": "case", "target": node_id})
+        for i, issue in enumerate(_FALLBACK_OVERVIEW["key_issues"]):
+            node_id = f"issue:{i}"
+            label = issue if len(issue) <= 60 else issue[:57] + "..."
+            nodes.append({"id": node_id, "label": label, "group": "issue", "value": 3})
+            links.append({"source": "case", "target": node_id})
+        return {"pending": False, "nodes": nodes, "links": links, "note": "Using the shared demo case graph."}
+
+    try:
+        with open_connection(cfg.db) as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """SELECT co.parties, co.key_issues, co.matter_type
+                       FROM case_overviews co
+                       JOIN cases c ON co.case_id = c.case_id
+                       WHERE COALESCE(c.is_demo, FALSE) = TRUE OR c.user_id IS NULL
+                       ORDER BY COALESCE(c.is_demo, FALSE) DESC, co.generated_at DESC
+                       LIMIT 1"""
+                )
+                overview_row = cur.fetchone()
+
+                cur.execute(
+                    """SELECT COALESCE(d.document_type, 'document') AS doc_type, COUNT(*)
+                       FROM documents d
+                       JOIN case_documents cd ON cd.document_id = d.document_id
+                       JOIN cases c ON c.case_id = cd.case_id
+                       WHERE COALESCE(c.is_demo, FALSE) = TRUE OR c.user_id IS NULL
+                       GROUP BY doc_type
+                       ORDER BY COUNT(*) DESC
+                       LIMIT 12"""
+                )
+                doc_type_rows = cur.fetchall()
+            finally:
+                cur.close()
+
+        if overview_row is None:
+            return _fallback()
+
+        parties = overview_row[0] or _FALLBACK_OVERVIEW["parties"]
+        key_issues = overview_row[1] or _FALLBACK_OVERVIEW["key_issues"]
+        matter_type = overview_row[2] or _FALLBACK_OVERVIEW["matter_type"]
+
+        nodes: list[dict[str, Any]] = [{"id": "case", "label": matter_type, "group": "case", "value": 8}]
+        links: list[dict[str, Any]] = []
+
+        for party in parties:
+            name = party.get("name") if isinstance(party, dict) else str(party)
+            if not name:
+                continue
+            node_id = f"party:{name}"
+            nodes.append({"id": node_id, "label": name, "group": "party", "value": 4})
+            links.append({"source": "case", "target": node_id})
+
+        for i, issue in enumerate(key_issues):
+            text = issue if isinstance(issue, str) else str(issue)
+            label = text if len(text) <= 60 else text[:57] + "..."
+            node_id = f"issue:{i}"
+            nodes.append({"id": node_id, "label": label, "group": "issue", "value": 3})
+            links.append({"source": "case", "target": node_id})
+
+        for doc_type, count in doc_type_rows:
+            node_id = f"doctype:{doc_type}"
+            nodes.append({"id": node_id, "label": doc_type, "group": "doc_type", "value": min(int(count), 10)})
+            links.append({"source": "case", "target": node_id})
+
+        return {"pending": False, "nodes": nodes, "links": links, "generated_at": None}
+    except Exception as exc:
+        logger.error("demo_case_graph: %s", exc, exc_info=True)
+        return _fallback()
 
 
 # ── GET /api/demo/admin/costs ─────────────────────────────────────────────────
